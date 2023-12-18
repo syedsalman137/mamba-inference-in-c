@@ -1,5 +1,8 @@
 # Model files
 *.bin
 
+# Exexcutables
+*.exe
+
 # VS Code files
 *.vscode
