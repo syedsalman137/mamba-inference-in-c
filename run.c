@@ -47,19 +47,17 @@ typedef struct {
 
 typedef struct {
     // current wave of activations
-    float *x;       // activation at current time stamp (dim,)
-    float *xb;      // same, but inside a residual branch (dim,)
-    float *xb2;     // an additional buffer just for convenience (dim,)
-    float *hb;      // buffer for hidden dimension in the ffn (hidden_dim,)
-    float *hb2;     // buffer for hidden dimension in the ffn (hidden_dim,)
-    float *q;       // query (dim,)
-    float *k;       // key (dim,)
-    float *v;       // value (dim,)
-    float *att;     // buffer for scores/attention values (n_heads, seq_len)
+    float *x;    // activation at current time stamp (dim,)
+    float *xb;   // same, but inside a residual branch (dim,)
+    float *xb2;  // an additional buffer just for convenience (d_inner,)
+    float *in_proj_out;
+    float *out_proj_out;
+    float *conv_out;
+    float *A;
     float *logits;  // output logits
     // kv cache
-    float *key_cache;    // (layer, seq_len, dim)
-    float *value_cache;  // (layer, seq_len, dim)
+    float *conv_state;
+    float *x_ssm;
 } RunState;
 
 typedef struct {
@@ -73,16 +71,22 @@ typedef struct {
 } Mamba;
 
 void malloc_run_state(RunState *s, Config *p) {
+    int d_inner = p->dim * p->expand;
     // we calloc instead of malloc to keep valgrind happy
     s->x = calloc(p->dim, sizeof(float));
     s->xb = calloc(p->dim, sizeof(float));
-    s->xb2 = calloc(p->dim, sizeof(float));
+    s->xb2 = calloc(d_inner, sizeof(float));
 
     // s->key_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
     // s->value_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
+    s->in_proj_out = calloc(d_inner * 2, sizeof(float));
+    s->conv_state = calloc(p->n_layers * (p->max_seq_len + p->d_conv - 1) * d_inner, sizeof(float));
+    s->conv_out = calloc(d_inner, sizeof(float));
+    s->x_ssm = calloc(p->n_layers * d_inner * p->d_state, sizeof(float));
+    s->out_proj_out = calloc(p->dim, sizeof(float));
     s->logits = calloc(p->vocab_size, sizeof(float));
     // ensure all mallocs went fine
-    if (!s->x || !s->xb || !s->xb2 || !s->hb || !s->hb2 || !s->q || !s->key_cache || !s->value_cache || !s->att || !s->logits) {
+    if (!s->x || !s->xb || !s->xb2 || !s->in_proj_out || !s->conv_state || !s->conv_out || !s->x_ssm || !s->out_proj_out || !s->logits) {
         fprintf(stderr, "malloc failed!\n");
         exit(EXIT_FAILURE);
     }
@@ -92,13 +96,8 @@ void free_run_state(RunState *s) {
     free(s->x);
     free(s->xb);
     free(s->xb2);
-    free(s->hb);
-    free(s->hb2);
-    free(s->q);
-    free(s->att);
+    free(s->conv_state);
     free(s->logits);
-    free(s->key_cache);
-    free(s->value_cache);
 }
 
 void memory_map_weights(MambaWeights *w, Config *p, float *ptr, bool shared_weights) {
@@ -159,11 +158,13 @@ void read_checkpoint(char *checkpoint, Config *config, MambaWeights *weights, in
         exit(EXIT_FAILURE);
     }
 
+    // read in the shared weights (between input embedding and linear output) flag
     bool shared_weights;
     if (fread(&shared_weights, sizeof(bool), 1, file) != 1) {
         fprintf(stderr, "Error reading content %s\n", checkpoint);
         exit(EXIT_FAILURE);
     }
+
     fseek(file, 0, SEEK_END);  // move file pointer to end of file
     *file_size = ftell(file);  // get the file size, in bytes
     fclose(file);
@@ -178,11 +179,14 @@ void read_checkpoint(char *checkpoint, Config *config, MambaWeights *weights, in
         fprintf(stderr, "mmap failed!\n");
         exit(EXIT_FAILURE);
     }
+
+    // First 256 bytes contain headers, so skip them
     float *weights_ptr = *data + 256 / sizeof(float);
+
     memory_map_weights(weights, config, weights_ptr, shared_weights);
 }
 
-void build_transformer(Mamba *t, char *checkpoint_path) {
+void build_mamba(Mamba *t, char *checkpoint_path) {
     // read in the Config and the Weights from the checkpoint
     read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->fd, &t->data, &t->file_size);
     // allocate the RunState buffers
@@ -306,7 +310,7 @@ void conv1d_groups_padding(float *out, float *x, float *w, int n, int d, int k, 
 }
 
 void silu(float *x, int d) {
-    // Swish-1: x * sigmoid(x)
+    // Swish: x * sigmoid(x)
     for (int i = 0; i < d; i++) {
         float val = x[i];
         val *= (1.0f / (1.0f + expf(-val)));
@@ -314,158 +318,146 @@ void silu(float *x, int d) {
     }
 }
 
-void negexp(float *x, int d) {
+void negexp(float *out, float *x, int d) {
     for (int i = 0; i < d; i++) {
-        x[i] = -expf(x[i]);
+        out[i] = -expf(x[i]);
     }
 }
 
 void softplus(float *x, int d) {
     for (int i = 0; i < d; i++) {
-        x[i] = logf(1.0f + expf(x[i]));
+        x[i] = (float)log(1.0 + exp((double)x[i]));
     }
 }
 
-// float *forward(Mamba *mamba, int token, int pos) {
-//     // a few convenience variables
-//     Config *p = &mamba->config;
-//     MambaWeights *w = &mamba->weights;
-//     RunState *s = &mamba->state;
-//     float *x = s->x;
-//     int dim = p->dim;
-//     int d_state = p->d_state;
-//     int d_conv = p->d_conv;
-//     int expand = p->expand;
-//     int d_inner = p->dim * p->expand;
+void ssm(float *y, unsigned long long l, RunState *s, Config *p, MambaWeights *w) {
+    int dim = p->dim;
+    int d_state = p->d_state;
+    int d_conv = p->d_conv;
+    int expand = p->expand;
+    int d_inner = p->dim * p->expand;
+    int dt_rank = p->dt_rank;
+    int max_seq_len = p->max_seq_len;
 
-//     // copy the token embedding into x
-//     float *content_row = w->token_embedding_table + token * dim;
-//     memcpy(x, content_row, dim * sizeof(*x));
+    float *A = calloc(d_inner * p->d_state, sizeof(float));
+    negexp(A, w->A_log + l * d_inner * d_state, d_inner * d_state);
+    float *D = w->D + l * d_inner;
+    char ch;  // at the top of main
+    scanf(" %c", &ch);
+    fprintf(stderr, "%lld\n", l);
+    float *x_proj_out = calloc(p->dt_rank + (p->d_state * 2), sizeof(float));
+    float *delta = calloc(d_inner, sizeof(float));
+    float *deltaA = calloc(d_inner * p->d_state, sizeof(float));
+    float *deltaB_u = calloc(d_inner * p->d_state, sizeof(float));
 
-//     // forward all the layers
-//     for (unsigned long long l = 0; l < p->n_layers; l++) {
-//         // attention rmsnorm
-//         rmsnorm(s->xb, x, w->rms_weight + l * dim, dim);
+    // SSM here
+    matmul(x_proj_out, s->conv_out, w->x_proj_weight + l * (dt_rank + 2 * d_state), dt_rank + 2 * d_state, d_inner);
+    float *B = x_proj_out + dt_rank;
+    float *C = B + d_state;
 
-//         matmul(s->q, s->xb, w->in_proj_weight + l * dim * (d_inner * 2), d_inner * 2, dim);
+    matmul(delta, x_proj_out, w->dt_proj_weight + l * d_inner, d_inner, dt_rank);
+    for (int i = 0; i < d_inner; i++) {
+        delta[i] += w->dt_proj_bias[i];
+    }
+    softplus(delta, d_inner);
 
-//         s->res = s->q + d_inner;
+    for (int i = 0; i < d_inner; i++) {
+        for (int j = 0; j < d_state; j++) {
+            deltaA[i * d_state + j] = delta[i] * A[i * d_state + j];
+        }
+    }
 
-//         // conv1d_groups_padding(float *out, float *x, float *w, int n, int d, int k, int n_groups, int pad)
-//         conv1d_groups_padding(s->xb, s->q, w->conv1d_weight + l * d_conv * d_inner, d_inner, d_conv, d_conv, d_inner, d_conv - 1);
-//         for (int i = 0; i < d_inner; i++) {
-//             s->xb[i] += w->conv1d_bias[l * d_inner + i];
-//         }
-//         silu(s->xb, d_inner);
+    for (int i = 0; i < d_inner; i++) {
+        for (int j = 0; j < d_state; j++) {
+            deltaB_u[i * d_state + j] = delta[i] * B[j] * s->conv_out[i];
+        }
+    }
 
-//         s->A = negexp(w->A_log + l * d_inner * d_state, d_inner * d_state);
-//         s->D = w->D + l * d_inner;
+    for (int i = 0; i < d_inner; i++) {
+        for (int j = 0; j < d_state; j++) {
+            s->x_ssm[l * d_inner * d_state + i * d_state + j] *= deltaA[i * d_state + j];
+            s->x_ssm[l * d_inner * d_state + i * d_state + j] += deltaB_u[i * d_state + j];
+            y[i] += s->x_ssm[l * d_inner * d_state + i * d_state + j] * C[j];
+        }
+        y[i] += s->conv_out[i] * D[i];
+    }
+    free(A);
+    free(x_proj_out);
+    free(delta);
+    free(deltaA);
+    free(deltaB_u);
+}
 
-//         matmul(s->delta, s->xb, w->x_proj_weight + l * d_inner * (p->dt_rank + d_state * 2), p->dt_rank + d_state * 2, d_inner);
-//         s->B = s->delta + p->dt_rank;
-//         s->C = s->B + d_state;
+float *forward(Mamba *mamba, int token, int pos) {
+    // a few convenience variables
+    Config *p = &mamba->config;
+    MambaWeights *w = &mamba->weights;
+    RunState *s = &mamba->state;
+    float *x = s->x;
+    int dim = p->dim;
+    int d_state = p->d_state;
+    int d_conv = p->d_conv;
+    int expand = p->expand;
+    int d_inner = p->dim * p->expand;
+    int dt_rank = p->dt_rank;
+    int max_seq_len = p->max_seq_len;
 
-//         softplus(s->delta, p->dt_rank);
+    // copy the token embedding into x
+    float *content_row = w->token_embedding_table + token * dim;
+    memcpy(x, content_row, dim * sizeof(*x));
+    for (unsigned long long l = 0; l < p->n_layers; l++) {
+        rmsnorm(s->xb, x, w->rms_weight + l * dim, dim);
+        matmul(s->in_proj_out, s->xb, w->in_proj_weight + l * dim * (d_inner * 2), d_inner * 2, dim);
+        s->xb2 = s->in_proj_out + d_inner;
 
-//         // selective scan here
-//         for (int k = 0; k < p->dt_rank + d_state * 2; k++) {
-//             for (int i = 0; i < d_inner; i++) {
-//                 s->deltaA[k][i] = s->delta[k] * s->A[k];
-//             }
-//         }
+        // set the conv state
+        unsigned long long pos_idx = l * (max_seq_len + d_conv - 1) * d_inner + (pos + d_conv - 1) * d_inner;
+        for (int i = 0; i < d_inner; i++) {
+            float val = s->in_proj_out[i];
+            s->conv_state[pos_idx + i] = val;
+        }
 
-//         for (int i = 0; k < p->dt_rank + d_state * 2; i++) {
-//             for (int j = 0; i < d_inner; j++) {
-//                 s->deltaB_u[i][j] = s->delta[j] * s->B[j] * s->u[j];
-//             }
-//         }
+        // Convolve
+        unsigned long long layer_idx = l * (max_seq_len + d_conv - 1) * d_inner;
+        for (int i = 0; i < d_inner; i++) {
+            for (int j = pos; j < pos + d_conv; j++) {
+                s->conv_out[i] = w->conv1d_weight[l * d_inner * d_conv + i * d_conv + j] * s->conv_state[layer_idx + j * d_inner + i];
+            }
+        }
 
-//         for (int i = 0; i < d_inner; i++) {
-//             s->xdelta[i][] =
-//         }
+        // Conv bias
+        for (int i = 0; i < d_inner; i++) {
+            s->conv_out[i] += w->conv1d_bias[l * d_inner + i];
+        }
 
-//         // multihead attention. iterate over all heads
-//         int h;
-//         // #pragma omp parallel for private(h)
-//         for (h = 0; h < p->n_heads; h++) {
-//             // get the query vector for this head
-//             float *q = s->q + h * head_size;
-//             // attention scores for this head
-//             float *att = s->att + h * p->seq_len;
-//             // iterate over all timesteps, including the current one
-//             for (int t = 0; t <= pos; t++) {
-//                 // get the key vector for this head and at this timestep
-//                 float *k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-//                 // calculate the attention score as the dot product of q and k
-//                 float score = 0.0f;
-//                 for (int i = 0; i < head_size; i++) {
-//                     score += q[i] * k[i];
-//                 }
-//                 score /= sqrtf(head_size);
-//                 // save the score to the attention buffer
-//                 att[t] = score;
-//             }
+        silu(s->conv_out, d_inner);
 
-//             // softmax the scores to get attention weights, from 0..pos inclusively
-//             softmax(att, pos + 1);
+        float *y = (float *)calloc(d_inner, sizeof(float));
+        ssm(y, l, s, p, w);
 
-//             // weighted sum of the values, store back into xb
-//             float *xb = s->xb + h * head_size;
-//             memset(xb, 0, head_size * sizeof(float));
-//             for (int t = 0; t <= pos; t++) {
-//                 // get the value vector for this head and at this timestep
-//                 float *v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-//                 // get the attention weight for this timestep
-//                 float a = att[t];
-//                 // accumulate the weighted value into xb
-//                 for (int i = 0; i < head_size; i++) {
-//                     xb[i] += a * v[i];
-//                 }
-//             }
-//         }
+        fprintf(stderr, "%lld\n", l);
+        for (int i = 0; i < d_inner; i++) {
+            float val = s->xb2[i];
+            // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
+            val *= (1.0f / (1.0f + expf(-val)));
+            y[i] *= val;
+        }
 
-//         // final matmul to get the output of the attention
-//         matmul(s->xb2, s->xb, w->wo + l * dim * dim, dim, dim);
+        matmul(s->out_proj_out, y, w->out_proj_weight + l * dim, dim, d_inner);
+        for (int i = 0; i < dim; i++) {
+            // Residual connection
+            x[i] += s->out_proj_out[i];
+        }
 
-//         // residual connection back into x
-//         for (int i = 0; i < dim; i++) {
-//             x[i] += s->xb2[i];
-//         }
+        free(y);
+    }
+    // final rms norm
+    rmsnorm(x, x, w->rms_final_weight, dim);
 
-//         // ffn rmsnorm
-//         rmsnorm(s->xb, x, w->rms_ffn_weight + l * dim, dim);
-
-//         // Now for FFN in PyTorch we have: self.w2(F.silu(self.w1(x)) * self.w3(x))
-//         // first calculate self.w1(x) and self.w3(x)
-//         matmul(s->hb, s->xb, w->w1 + l * dim * hidden_dim, dim, hidden_dim);
-//         matmul(s->hb2, s->xb, w->w3 + l * dim * hidden_dim, dim, hidden_dim);
-
-//         // SwiGLU non-linearity
-//         for (int i = 0; i < hidden_dim; i++) {
-//             float val = s->hb[i];
-//             // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
-//             val *= (1.0f / (1.0f + expf(-val)));
-//             // elementwise multiply with w3(x)
-//             val *= s->hb2[i];
-//             s->hb[i] = val;
-//         }
-
-//         // final matmul to get the output of the ffn
-//         matmul(s->xb, s->hb, w->w2 + l * dim * hidden_dim, hidden_dim, dim);
-
-//         // residual connection
-//         for (int i = 0; i < dim; i++) {
-//             x[i] += s->xb[i];
-//         }
-//     }
-
-//     // final rmsnorm
-//     rmsnorm(x, x, w->rms_final_weight, dim);
-
-//     // classifier into logits
-//     matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
-//     return s->logits;
-// }
+    // classifier into logits
+    matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
+    return s->logits;
+}
 // ----------------------------------------------------------------------------
 // The Byte Pair Encoding (BPE) Tokenizer that translates strings <-> tokens
 
@@ -607,11 +599,10 @@ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *
     // add optional BOS (=0) token, if desired
     if (bos) tokens[(*n_tokens)++] = 0;
 
-    // add_dummy_prefix is true by default
-    // so prepend a dummy prefix token to the input string, but only if text != ""
+    // add_dummy_prefix is false by default
+    // If you want to enable it, you can uncomment the following code
+    // However, doing so will affect the quality of model outputs
 
-    // TODO: pretty sure this isn't correct in the general case but I don't have the
-    // energy to read more of the sentencepiece code to figure out what it's doing
     // if (text[0] != '\0') {
     //     int dummy_prefix = str_lookup(" ", t->sorted_vocab, t->vocab_size);
     //     tokens[(*n_tokens)++] = dummy_prefix;
@@ -658,6 +649,7 @@ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *
             // byte_fallback encoding: just encode each byte as a token
             // +2 is here because the first 2 vocab elements are <unk>, <s>, </s>
             // so the individual bytes only start at index 2
+            // TODO: Explain '-33'
             for (int i = 0; i < str_len; i++) {
                 tokens[(*n_tokens)++] = (unsigned char)str_buffer[i] + 2 - 33;
             }
@@ -751,14 +743,16 @@ void apply_chat_template(char *prompt, int user, int system) {
 
 int main(int argc, char **argv) {
     char *checkpoint_path = "mamba-130m.bin";
-    Config config;
-    MambaWeights weights;
-    int fd;
-    float *data;
-    int64_t file_size;
-    read_checkpoint(checkpoint_path, &config, &weights, &fd, &data, &file_size);
-    print_config(&config);
-    printf("Finished reading\n");
+    // Config config;
+    // MambaWeights weights;
+    // int fd;
+    // float *data;
+    // int64_t file_size;
+    // read_checkpoint(checkpoint_path, &config, &weights, &fd, &data, &file_size);
+    // print_config(&config);
+    // printf("Finished reading\n");
+    Mamba mamba;
+    build_mamba(&mamba, "mamba-130m.bin");
     Tokenizer tokenizer;
     // There are 50010 merges
     build_tokenizer(&tokenizer, "tokenizer.bin", 50009);
@@ -770,10 +764,8 @@ int main(int argc, char **argv) {
     int num_prompt_tokens = 0;
     int *prompt_tokens = (int *)malloc((strlen(text) + 3) * sizeof(int));  // +3 for '\0', ?BOS, ?EOS
     encode(&tokenizer, text, 1, 1, prompt_tokens, &num_prompt_tokens);
-    printf("\nPrint 'hello world!\tI am here.' in tokens: \n");
-    for (int i = 0; i < num_prompt_tokens; i++) {
-        printf("%d %s\n", prompt_tokens[i], prompt_tokens[i] >= 0 ? tokenizer.vocab[prompt_tokens[i]] : "null");
-    }
+
+    forward(&mamba, prompt_tokens[3], 0);
     printf("\n");
     return 0;
 }
