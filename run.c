@@ -53,11 +53,15 @@ typedef struct {
     float *in_proj_out;
     float *out_proj_out;
     float *conv_out;
-    float *A;
     float *logits;  // output logits
     // kv cache
     float *conv_state;
     float *x_ssm;
+    float *A;
+    float *x_proj_out;
+    float *delta;
+    float *deltaA;
+    float *deltaB_u;
 } RunState;
 
 typedef struct {
@@ -85,6 +89,11 @@ void malloc_run_state(RunState *s, Config *p) {
     s->x_ssm = calloc(p->n_layers * d_inner * p->d_state, sizeof(float));
     s->out_proj_out = calloc(p->dim, sizeof(float));
     s->logits = calloc(p->vocab_size, sizeof(float));
+    s->A = calloc(d_inner * p->d_state, sizeof(float));
+    s->x_proj_out = calloc(p->dt_rank + (p->d_state * 2), sizeof(float));
+    s->delta = calloc(d_inner, sizeof(float));
+    s->deltaA = calloc(d_inner * p->d_state, sizeof(float));
+    s->deltaB_u = calloc(d_inner * p->d_state, sizeof(float));
     // ensure all mallocs went fine
     if (!s->x || !s->xb || !s->xb2 || !s->in_proj_out || !s->conv_state || !s->conv_out || !s->x_ssm || !s->out_proj_out || !s->logits) {
         fprintf(stderr, "malloc failed!\n");
@@ -96,8 +105,17 @@ void free_run_state(RunState *s) {
     free(s->x);
     free(s->xb);
     free(s->xb2);
+    free(s->in_proj_out);
     free(s->conv_state);
+    free(s->conv_out);
+    free(s->x_ssm);
+    free(s->out_proj_out);
     free(s->logits);
+    free(s->A);
+    free(s->x_proj_out);
+    free(s->delta);
+    free(s->deltaA);
+    free(s->deltaB_u);
 }
 
 void memory_map_weights(MambaWeights *w, Config *p, float *ptr, bool shared_weights) {
@@ -257,58 +275,6 @@ void matmul(float *xout, float *x, float *w, int n, int d) {
     }
 }
 
-void conv1d(float *out, float *x, float *w, int n, int d, int k) {
-    // x: input signal of length n
-    // w: kernel of length k
-    // d: number of filters
-    // out: output signal of length n - k + 1
-
-    for (int i = 0; i < d; i++) {              // Loop over filters
-        for (int j = 0; j < n - k + 1; j++) {  // Loop over output positions
-            float val = 0.0f;
-            for (int m = 0; m < k; m++) {  // Loop over kernel elements
-                val += x[j + m] * w[i * k + m];
-            }
-            out[i * (n - k + 1) + j] = val;
-        }
-    }
-}
-
-void conv1d_groups_padding(float *out, float *x, float *w, int n, int d, int k, int n_groups, int pad) {
-    // x: input signal of length n
-    // w: kernel of length k * d / n_groups
-    // d: number of filters
-    // n_groups: number of groups
-    // pad: padding on each side
-    // out: output signal of length n - k + 1 + 2 * pad
-
-    int ch_per_group = d / n_groups;  // Channels per group
-    int padded_n = n + 2 * pad;       // Padded input length
-
-    // Pad the input signal with zeros
-    float padded_x[padded_n];
-    for (int i = 0; i < pad; i++) {
-        padded_x[i] = 0.0f;
-        padded_x[padded_n - i - 1] = 0.0f;
-    }
-    for (int i = 0; i < n; i++) {
-        padded_x[i + pad] = x[i];
-    }
-
-    // Perform grouped convolution with padding
-    for (int g = 0; g < n_groups; g++) {
-        for (int i = g * ch_per_group; i < (g + 1) * ch_per_group; i++) {
-            for (int j = 0; j < padded_n - k + 1; j++) {
-                float val = 0.0f;
-                for (int m = 0; m < k; m++) {
-                    val += padded_x[j + m] * w[(i * k) + (g * ch_per_group * k) + m];
-                }
-                out[i * (padded_n - k + 1) + j] = val;
-            }
-        }
-    }
-}
-
 void silu(float *x, int d) {
     // Swish: x * sigmoid(x)
     for (int i = 0; i < d; i++) {
@@ -339,53 +305,39 @@ void ssm(float *y, unsigned long long l, RunState *s, Config *p, MambaWeights *w
     int dt_rank = p->dt_rank;
     int max_seq_len = p->max_seq_len;
 
-    float *A = calloc(d_inner * p->d_state, sizeof(float));
-    negexp(A, w->A_log + l * d_inner * d_state, d_inner * d_state);
-    float *D = w->D + l * d_inner;
-    char ch;  // at the top of main
-    scanf(" %c", &ch);
-    fprintf(stderr, "%lld\n", l);
-    float *x_proj_out = calloc(p->dt_rank + (p->d_state * 2), sizeof(float));
-    float *delta = calloc(d_inner, sizeof(float));
-    float *deltaA = calloc(d_inner * p->d_state, sizeof(float));
-    float *deltaB_u = calloc(d_inner * p->d_state, sizeof(float));
-
     // SSM here
-    matmul(x_proj_out, s->conv_out, w->x_proj_weight + l * (dt_rank + 2 * d_state), dt_rank + 2 * d_state, d_inner);
-    float *B = x_proj_out + dt_rank;
+    matmul(s->x_proj_out, s->conv_out, w->x_proj_weight + l * (dt_rank + 2 * d_state) * d_inner, d_inner, dt_rank + 2 * d_state);
+    float *B = s->x_proj_out + dt_rank;
     float *C = B + d_state;
 
-    matmul(delta, x_proj_out, w->dt_proj_weight + l * d_inner, d_inner, dt_rank);
+    float *D = w->D + l * d_inner;
+
+    matmul(s->delta, s->x_proj_out, w->dt_proj_weight + l * d_inner * dt_rank, dt_rank, d_inner);
     for (int i = 0; i < d_inner; i++) {
-        delta[i] += w->dt_proj_bias[i];
+        s->delta[i] += w->dt_proj_bias[i];
     }
-    softplus(delta, d_inner);
+    softplus(s->delta, d_inner);
 
     for (int i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
-            deltaA[i * d_state + j] = delta[i] * A[i * d_state + j];
+            s->deltaA[i * d_state + j] = s->delta[i] * s->A[i * d_state + j];
         }
     }
 
     for (int i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
-            deltaB_u[i * d_state + j] = delta[i] * B[j] * s->conv_out[i];
+            s->deltaB_u[i * d_state + j] = s->delta[i] * B[j] * s->conv_out[i];
         }
     }
 
     for (int i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
-            s->x_ssm[l * d_inner * d_state + i * d_state + j] *= deltaA[i * d_state + j];
-            s->x_ssm[l * d_inner * d_state + i * d_state + j] += deltaB_u[i * d_state + j];
+            s->x_ssm[l * d_inner * d_state + i * d_state + j] *= s->deltaA[i * d_state + j];
+            s->x_ssm[l * d_inner * d_state + i * d_state + j] += s->deltaB_u[i * d_state + j];
             y[i] += s->x_ssm[l * d_inner * d_state + i * d_state + j] * C[j];
         }
         y[i] += s->conv_out[i] * D[i];
     }
-    free(A);
-    free(x_proj_out);
-    free(delta);
-    free(deltaA);
-    free(deltaB_u);
 }
 
 float *forward(Mamba *mamba, int token, int pos) {
@@ -407,8 +359,8 @@ float *forward(Mamba *mamba, int token, int pos) {
     memcpy(x, content_row, dim * sizeof(*x));
     for (unsigned long long l = 0; l < p->n_layers; l++) {
         rmsnorm(s->xb, x, w->rms_weight + l * dim, dim);
-        matmul(s->in_proj_out, s->xb, w->in_proj_weight + l * dim * (d_inner * 2), d_inner * 2, dim);
-        s->xb2 = s->in_proj_out + d_inner;
+        matmul(s->in_proj_out, s->xb, w->in_proj_weight + l * dim * (d_inner * 2), dim, d_inner * 2);
+        float *res = s->in_proj_out + d_inner;
 
         // set the conv state
         unsigned long long pos_idx = l * (max_seq_len + d_conv - 1) * d_inner + (pos + d_conv - 1) * d_inner;
@@ -420,8 +372,8 @@ float *forward(Mamba *mamba, int token, int pos) {
         // Convolve
         unsigned long long layer_idx = l * (max_seq_len + d_conv - 1) * d_inner;
         for (int i = 0; i < d_inner; i++) {
-            for (int j = pos; j < pos + d_conv; j++) {
-                s->conv_out[i] = w->conv1d_weight[l * d_inner * d_conv + i * d_conv + j] * s->conv_state[layer_idx + j * d_inner + i];
+            for (int j = pos, j_conv = 0; j < pos + d_conv; j++, j_conv++) {
+                s->conv_out[i] = w->conv1d_weight[l * d_inner * d_conv + i * d_conv + j_conv] * s->conv_state[layer_idx + j * d_inner + i];
             }
         }
 
@@ -432,23 +384,23 @@ float *forward(Mamba *mamba, int token, int pos) {
 
         silu(s->conv_out, d_inner);
 
-        float *y = (float *)calloc(d_inner, sizeof(float));
+        float *y = calloc(d_inner, sizeof(float));
         ssm(y, l, s, p, w);
 
-        fprintf(stderr, "%lld\n", l);
         for (int i = 0; i < d_inner; i++) {
-            float val = s->xb2[i];
+            float val = res[i];
             // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
             val *= (1.0f / (1.0f + expf(-val)));
             y[i] *= val;
         }
 
-        matmul(s->out_proj_out, y, w->out_proj_weight + l * dim, dim, d_inner);
+        matmul(s->out_proj_out, y, w->out_proj_weight + l * dim * d_inner, d_inner, dim);
         for (int i = 0; i < dim; i++) {
             // Residual connection
             x[i] += s->out_proj_out[i];
         }
 
+        fprintf(stderr, "%lld out of %d\n", l, p->n_layers);
         free(y);
     }
     // final rms norm
@@ -741,18 +693,67 @@ void apply_chat_template(char *prompt, int user, int system) {
     prompt[strlen(prompt)] = '\0';
 }
 
+void test_float(float f) {
+    if (isnan(f)) {
+        printf("nan\n");
+    } else if (isinf(f)) {
+        printf("inf\n");
+    }
+}
+
+void test(Mamba *m) {
+    MambaWeights *w = &m->weights;
+    Config *p = &m->config;
+    int d_inner = p->dim * p->expand;
+    for (int i = 0; i < p->vocab_size * p->dim; i++) {
+        test_float(w->token_embedding_table[i]);
+    }
+    for (unsigned long long l = 0; l < p->n_layers; l++) {
+        printf("%lld\n", l);
+        for (int i = 0; i < p->dim; i++) {
+            test_float(w->rms_weight[i + l * p->dim]);
+        }
+
+        for (int i = 0; i < p->dim * (d_inner * 2); i++) {
+            test_float(w->in_proj_weight[i + l * p->dim * (d_inner * 2)]);
+        }
+
+        for (int i = 0; i < p->d_conv * d_inner; i++) {
+            test_float(w->conv1d_weight[i + l * p->d_conv * d_inner]);
+        }
+        for (int i = 0; i < d_inner; i++) {
+            test_float(w->conv1d_bias[i + l * d_inner]);
+        }
+        for (int i = 0; i < d_inner * (p->dt_rank + p->d_state * 2); i++) {
+            test_float(w->x_proj_weight[i + l * d_inner * (p->dt_rank + p->d_state * 2)]);
+        }
+        for (int i = 0; i < d_inner * p->dt_rank; i++) {
+            test_float(w->dt_proj_weight[i + l * d_inner * p->dt_rank]);
+        }
+
+        for (int i = 0; i < d_inner; i++) {
+            test_float(w->dt_proj_bias[i + l * d_inner]);
+        }
+        for (int i = 0; i < d_inner * p->dim; i++) {
+            test_float(w->out_proj_weight[i + l * d_inner * p->dim]);
+        }
+        for (int i = 0; i < d_inner * p->d_state; i++) {
+            test_float(w->A_log[i + l * d_inner * p->d_state]);
+        }
+        for (int i = 0; i < d_inner; i++) {
+            test_float(w->D[i + l * d_inner]);
+        }
+    }
+    for (int i = 0; i < p->dim * 1; i++) {
+        test_float(w->rms_final_weight[i]);
+    }
+}
+
 int main(int argc, char **argv) {
     char *checkpoint_path = "mamba-130m.bin";
-    // Config config;
-    // MambaWeights weights;
-    // int fd;
-    // float *data;
-    // int64_t file_size;
-    // read_checkpoint(checkpoint_path, &config, &weights, &fd, &data, &file_size);
-    // print_config(&config);
-    // printf("Finished reading\n");
     Mamba mamba;
     build_mamba(&mamba, "mamba-130m.bin");
+    // test(&mamba);
     Tokenizer tokenizer;
     // There are 50010 merges
     build_tokenizer(&tokenizer, "tokenizer.bin", 50009);
@@ -765,7 +766,13 @@ int main(int argc, char **argv) {
     int *prompt_tokens = (int *)malloc((strlen(text) + 3) * sizeof(int));  // +3 for '\0', ?BOS, ?EOS
     encode(&tokenizer, text, 1, 1, prompt_tokens, &num_prompt_tokens);
 
-    forward(&mamba, prompt_tokens[3], 0);
-    printf("\n");
+    float *logits = forward(&mamba, prompt_tokens[3], 0);
+    for (int i = 0; i < mamba.config.vocab_size; i++) {
+        printf("%f ", logits[i]);
+    }
+    free(text);
+    free(prompt_tokens);
+    free_tokenizer(&tokenizer);
+    free_mamba(&mamba);
     return 0;
 }
