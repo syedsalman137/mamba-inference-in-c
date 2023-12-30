@@ -89,7 +89,7 @@ void malloc_run_state(RunState* s, Config* p) {
     s->x_ssm = calloc(p->n_layers * d_inner * p->d_state, sizeof(float));
     s->out_proj_out = calloc(p->dim, sizeof(float));
     s->logits = calloc(p->vocab_size, sizeof(float));
-    s->A = calloc(d_inner * p->d_state, sizeof(float));
+    s->A = calloc(p->n_layers * d_inner * p->d_state, sizeof(float));
     s->x_proj_out = calloc(p->dt_rank + (p->d_state * 2), sizeof(float));
     s->delta = calloc(d_inner, sizeof(float));
     s->deltaA = calloc(d_inner * p->d_state, sizeof(float));
@@ -307,7 +307,8 @@ void ssm(float* y, unsigned long long l, RunState* s, Config* p, MambaWeights* w
     int dt_rank = p->dt_rank;
     int max_seq_len = p->max_seq_len;
 
-    negexp(s->A, w->A_log + l * d_inner * d_state, d_inner * d_state);
+    // negexp(s->A, w->A_log + l * d_inner * d_state, d_inner * d_state);
+    float* A = s->A + l * d_inner * d_state;
 
     matmul(s->x_proj_out, s->conv_out, w->x_proj_weight + l * (dt_rank + 2 * d_state) * d_inner, d_inner, dt_rank + 2 * d_state);
     float* B = s->x_proj_out + dt_rank;
@@ -327,7 +328,7 @@ void ssm(float* y, unsigned long long l, RunState* s, Config* p, MambaWeights* w
 #pragma omp parallel for private(i)
     for (i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
-            s->deltaA[i * d_state + j] = expf(s->delta[i] * s->A[i * d_state + j]);
+            s->deltaA[i * d_state + j] = expf(s->delta[i] * A[i * d_state + j]);
         }
     }
 
@@ -362,6 +363,12 @@ float* forward(Mamba* mamba, int token, int pos) {
     int d_inner = p->dim * p->expand;
     int dt_rank = p->dt_rank;
     int max_seq_len = p->max_seq_len;
+
+    if (pos == 0) {
+        // precompute A_log -> A
+        negexp(s->A, w->A_log, p->n_layers * d_inner * d_state);
+    }
+
 
     // copy the token embedding into x
     float* content_row = w->token_embedding_table + token * dim;
