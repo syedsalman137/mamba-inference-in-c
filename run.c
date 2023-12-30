@@ -265,7 +265,7 @@ void matmul(float *xout, float *x, float *w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     int i;
-    // #pragma omp parallel for private(i)
+#pragma omp parallel for private(i)
     for (i = 0; i < d; i++) {
         float val = 0.0f;
         for (int j = 0; j < n; j++) {
@@ -307,6 +307,8 @@ void ssm(float *y, unsigned long long l, RunState *s, Config *p, MambaWeights *w
 
     // SSM here
     matmul(s->x_proj_out, s->conv_out, w->x_proj_weight + l * (dt_rank + 2 * d_state) * d_inner, d_inner, dt_rank + 2 * d_state);
+
+    negexp(s->A, w->A_log + l * d_inner * d_state, d_inner * d_state);
     float *B = s->x_proj_out + dt_rank;
     float *C = B + d_state;
 
@@ -330,6 +332,7 @@ void ssm(float *y, unsigned long long l, RunState *s, Config *p, MambaWeights *w
         }
     }
 
+#pragma omp parallel for private(i)
     for (int i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
             s->x_ssm[l * d_inner * d_state + i * d_state + j] *= s->deltaA[i * d_state + j];
@@ -400,7 +403,6 @@ float *forward(Mamba *mamba, int token, int pos) {
             x[i] += s->out_proj_out[i];
         }
 
-        fprintf(stderr, "%lld out of %d\n", l, p->n_layers);
         free(y);
     }
     // final rms norm
@@ -456,7 +458,7 @@ void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size) {
     int len;
     for (int i = 0; i < vocab_size; i++) {
         if (fread(t->vocab_scores + i, sizeof(float), 1, file) != 1) {
-            fprintf(stderr, "failed read513, %ld\n", FLT_MAX);
+            fprintf(stderr, "failed read513, %f\n", FLT_MAX);
             exit(EXIT_FAILURE);
         }
         if (fread(&len, sizeof(int32_t), 1, file) != 1) {
@@ -641,10 +643,336 @@ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *
     }
 
     // add optional EOS (=0) token, if desired
-    if (eos) tokens[(*n_tokens)++] = 0;
+    // if (eos) tokens[(*n_tokens)++] = 0;
 
     free(str_buffer);
 }
+
+// ----------------------------------------------------------------------------
+// The Sampler, which takes logits and returns a sampled token
+// sampling can be done in a few ways: greedy argmax, sampling, top-p sampling
+
+typedef struct {
+    float prob;
+    int index;
+} ProbIndex;  // struct used when sorting probabilities during top-p sampling
+
+typedef struct {
+    int vocab_size;
+    ProbIndex *probindex;  // buffer used in top-p sampling
+    float temperature;
+    float topp;
+    unsigned long long rng_state;
+} Sampler;
+
+int sample_argmax(float *probabilities, int n) {
+    // return the index that has the highest probability
+    int max_i = 0;
+    float max_p = probabilities[0];
+    for (int i = 1; i < n; i++) {
+        if (probabilities[i] > max_p) {
+            max_i = i;
+            max_p = probabilities[i];
+        }
+    }
+    return max_i;
+}
+
+int sample_mult(float *probabilities, int n, float coin) {
+    // sample index from probabilities (they must sum to 1!)
+    // coin is a random number in [0, 1), usually from random_f32()
+    float cdf = 0.0f;
+    for (int i = 0; i < n; i++) {
+        cdf += probabilities[i];
+        if (coin < cdf) {
+            return i;
+        }
+    }
+    return n - 1;  // in case of rounding errors
+}
+
+int compare(const void *a, const void *b) {
+    ProbIndex *a_ = (ProbIndex *)a;
+    ProbIndex *b_ = (ProbIndex *)b;
+    if (a_->prob > b_->prob) return -1;
+    if (a_->prob < b_->prob) return 1;
+    return 0;
+}
+
+int sample_topp(float *probabilities, int n, float topp, ProbIndex *probindex, float coin) {
+    // top-p sampling (or "nucleus sampling") samples from the smallest set of
+    // tokens that exceed probability topp. This way we never sample tokens that
+    // have very low probabilities and are less likely to go "off the rails".
+    // coin is a random number in [0, 1), usually from random_f32()
+
+    int n0 = 0;
+    // quicksort indices in descending order of probabilities
+    // values smaller than (1 - topp) / (n - 1) cannot be part of the result
+    // so for efficiency we crop these out as candidates before sorting
+    const float cutoff = (1.0f - topp) / (n - 1);
+    for (int i = 0; i < n; i++) {
+        if (probabilities[i] >= cutoff) {
+            probindex[n0].index = i;
+            probindex[n0].prob = probabilities[i];
+            n0++;
+        }
+    }
+    qsort(probindex, n0, sizeof(ProbIndex), compare);
+
+    // truncate the list where cumulative probability exceeds topp
+    float cumulative_prob = 0.0f;
+    int last_idx = n0 - 1;  // in case of rounding errors consider all elements
+    for (int i = 0; i < n0; i++) {
+        cumulative_prob += probindex[i].prob;
+        if (cumulative_prob > topp) {
+            last_idx = i;
+            break;  // we've exceeded topp by including last_idx
+        }
+    }
+
+    // sample from the truncated list
+    float r = coin * cumulative_prob;
+    float cdf = 0.0f;
+    for (int i = 0; i <= last_idx; i++) {
+        cdf += probindex[i].prob;
+        if (r < cdf) {
+            return probindex[i].index;
+        }
+    }
+    return probindex[last_idx].index;  // in case of rounding errors
+}
+
+void build_sampler(Sampler *sampler, int vocab_size, float temperature, float topp, unsigned long long rng_seed) {
+    sampler->vocab_size = vocab_size;
+    sampler->temperature = temperature;
+    sampler->topp = topp;
+    sampler->rng_state = rng_seed;
+    // buffer only used with nucleus sampling; may not need but it's ~small
+    sampler->probindex = malloc(sampler->vocab_size * sizeof(ProbIndex));
+}
+
+void free_sampler(Sampler *sampler) {
+    free(sampler->probindex);
+}
+
+unsigned int random_u32(unsigned long long *state) {
+    // xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
+    *state ^= *state >> 12;
+    *state ^= *state << 25;
+    *state ^= *state >> 27;
+    return (*state * 0x2545F4914F6CDD1Dull) >> 32;
+}
+float random_f32(unsigned long long *state) {  // random float32 in [0,1)
+    return (random_u32(state) >> 8) / 16777216.0f;
+}
+
+int sample(Sampler *sampler, float *logits) {
+    // sample the token given the logits and some hyperparameters
+    int next;
+    if (sampler->temperature == 0.0f) {
+        // greedy argmax sampling: take the token with the highest probability
+        next = sample_argmax(logits, sampler->vocab_size);
+    } else {
+        // apply the temperature to the logits
+        for (int q = 0; q < sampler->vocab_size; q++) {
+            logits[q] /= sampler->temperature;
+        }
+        // apply softmax to the logits to get the probabilities for next token
+        softmax(logits, sampler->vocab_size);
+        // flip a (float) coin (this is our source of entropy for sampling)
+        float coin = random_f32(&sampler->rng_state);
+        // we sample from this distribution to get the next token
+        if (sampler->topp <= 0 || sampler->topp >= 1) {
+            // simply sample from the predicted probability distribution
+            next = sample_mult(logits, sampler->vocab_size, coin);
+        } else {
+            // top-p (nucleus) sampling, clamping the least likely tokens to zero
+            next = sample_topp(logits, sampler->vocab_size, sampler->topp, sampler->probindex, coin);
+        }
+    }
+    return next;
+}
+
+// ----------------------------------------------------------------------------
+// utilities: time
+
+long time_in_ms() {
+    // return time in milliseconds, for benchmarking the model speed
+    struct timespec time;
+    clock_gettime(CLOCK_REALTIME, &time);
+    return time.tv_sec * 1000 + time.tv_nsec / 1000000;
+}
+
+// ----------------------------------------------------------------------------
+// generation loop
+
+void generate(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps) {
+    char *empty_prompt = "";
+    if (prompt == NULL) {
+        prompt = empty_prompt;
+    }
+
+    // encode the (string) prompt into tokens sequence
+    int num_prompt_tokens = 0;
+    int *prompt_tokens = (int *)malloc((strlen(prompt) + 3) * sizeof(int));  // +3 for '\0', ?BOS, ?EOS
+    encode(tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
+    if (num_prompt_tokens < 1) {
+        fprintf(stderr, "something is wrong, expected at least 1 prompt token\n");
+        exit(EXIT_FAILURE);
+    }
+
+    // start the main loop
+    long start = 0;                // used to time our code, only initialized after first iteration
+    int next;                      // will store the next token in the sequence
+    int token = prompt_tokens[0];  // kick off with the first token in the prompt
+    int pos = 0;                   // position in the sequence
+    while (pos < steps) {
+        // forward the mamba to get logits for the next token
+        float *logits = forward(mamba, token, pos);
+
+        // advance the state machine
+        if (pos < num_prompt_tokens - 1) {
+            // if we are still processing the input prompt, force the next prompt token
+            next = prompt_tokens[pos + 1];
+        } else {
+            // otherwise sample the next token from the logits
+            next = sample(sampler, logits);
+        }
+        pos++;
+
+        // data-dependent terminating condition: the BOS (=1) token delimits sequences
+        if (next == 0) {
+            break;
+        }
+
+        // print the token as string, decode it with the Tokenizer object
+        char *piece = decode(tokenizer, token, next);
+        safe_printf(piece);  // same as printf("%s", piece), but skips "unsafe" bytes
+        fflush(stdout);
+        token = next;
+
+        // init the timer here because the first iteration can be slower
+        if (start == 0) {
+            start = time_in_ms();
+        }
+    }
+    printf("\n");
+
+    // report achieved tok/s (pos-1 because the timer starts after first iteration)
+    if (pos > 1) {
+        long end = time_in_ms();
+        fprintf(stderr, "achieved tok/s: %f\n", (pos - 1) / (double)(end - start) * 1000);
+    }
+
+    free(prompt_tokens);
+}
+
+void read_stdin(const char *guide, char *buffer, size_t bufsize) {
+    // read a line from stdin, up to but not including \n
+    printf("%s", guide);
+    if (fgets(buffer, bufsize, stdin) != NULL) {
+        size_t len = strlen(buffer);
+        if (len > 0 && buffer[len - 1] == '\n') {
+            buffer[len - 1] = '\0';  // strip newline
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// chat loop
+// I manually inspected the tokens for a few chat conversations compared to
+// python reference and that seemed ok, but this was not thoroughly tested and
+// is not safely implemented, it's more a proof of concept atm.
+
+void chat(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler,
+          char *cli_user_prompt, char *cli_system_prompt, int steps) {
+    // buffers for reading the system prompt and user prompt from stdin
+    // you'll notice they are soomewhat haphazardly and unsafely set atm
+    char system_prompt[512];
+    char user_prompt[512];
+    char rendered_prompt[1152];
+    int num_prompt_tokens = 0;
+    int *prompt_tokens = (int *)malloc(1152 * sizeof(int));
+    int user_idx;
+
+    // start the main loop
+    int8_t user_turn = 1;  // user starts
+    int next;              // will store the next token in the sequence
+    int token;             // stores the current token to feed into the mamba
+    int prev_token;
+    int pos = 0;  // position in the sequence
+    while (pos < steps) {
+        // when it is the user's turn to contribute tokens to the dialog...
+        if (user_turn) {
+            // get the (optional) system prompt at position 0
+            if (pos == 0) {
+                // at position 0, the user can also contribute a system prompt
+                if (cli_system_prompt == NULL) {
+                    // system prompt was not passed in, attempt to get it from stdin
+                    read_stdin("Enter system prompt (optional): ", system_prompt, sizeof(system_prompt));
+                } else {
+                    // system prompt was passed in, use it
+                    strcpy(system_prompt, cli_system_prompt);
+                }
+            }
+            // get the user prompt
+            if (pos == 0 && cli_user_prompt != NULL) {
+                // user prompt for position 0 was passed in, use it
+                strcpy(user_prompt, cli_user_prompt);
+            } else {
+                // otherwise get user prompt from stdin
+                read_stdin("User: ", user_prompt, sizeof(user_prompt));
+            }
+            // render user/system prompts into the Llama 2 Chat schema
+            if (pos == 0 && system_prompt[0] != '\0') {
+                char system_template[] = "<|system|>\n%s";
+                sprintf(rendered_prompt, system_template, system_prompt, user_prompt);
+            } else {
+                char user_template[] = "<|user|>\n<|assistant|>%s\n";
+                sprintf(rendered_prompt, user_template, user_prompt);
+            }
+            // encode the rendered prompt into tokens
+            encode(tokenizer, rendered_prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
+            user_idx = 0;  // reset the user index
+            user_turn = 0;
+            printf("Assistant: ");
+        }
+
+        // determine the token to pass into the mamba next
+        if (user_idx < num_prompt_tokens) {
+            // if we are still processing the input prompt, force the next prompt token
+            token = prompt_tokens[user_idx++];
+        } else {
+            // otherwise use the next token sampled from previous turn
+            token = next;
+        }
+        // EOS (=0) token ends the Assistant turn
+        if (token == 0 && pos != 0) {
+            user_turn = 1;
+        }
+
+        // forward the mamba to get logits for the next token
+        float *logits = forward(mamba, token, pos);
+        next = sample(sampler, logits);
+        pos++;
+
+        if (user_idx >= num_prompt_tokens && next != 0) {
+            // the Assistant is responding, so print its output
+            char *piece = decode(tokenizer, token, next);
+            safe_printf(piece);  // same as printf("%s", piece), but skips "unsafe" bytes
+            fflush(stdout);
+        }
+        if (next == 0) {
+            printf("\n");
+        }
+    }
+    printf("\n");
+    free(prompt_tokens);
+}
+
+// ----------------------------------------------------------------------------
+// CLI, include only if not testing
+#ifndef TESTING
 
 void error_usage() {
     fprintf(stderr, "Usage:   run <checkpoint> [options]\n");
@@ -672,83 +1000,6 @@ void print_config(Config *config) {
     printf("max_seq_len = %d\n", config->max_seq_len);
 }
 
-void apply_chat_template(char *prompt, int user, int system) {
-    char *temp = (char *)malloc(strlen(prompt) + 1);
-    strcpy(temp, prompt);
-    temp[strlen(prompt)] = '\0';
-    free(prompt);
-    if (user) {
-        prompt = (char *)malloc(strlen(temp) + 1 + 9);
-        strcpy(prompt, "<|user|>");
-    } else if (system) {
-        prompt = (char *)malloc(strlen(temp) + 1 + 11);
-        strcpy(prompt, "<|system|>");
-    } else {
-        prompt = (char *)malloc(strlen(temp) + 1 + 14);
-        strcpy(prompt, "<|assistant|>");
-    }
-    strcpy(prompt, temp);
-    free(temp);
-    temp = NULL;
-    prompt[strlen(prompt)] = '\0';
-}
-
-void test_float(float f) {
-    if (isnan(f)) {
-        printf("nan\n");
-    } else if (isinf(f)) {
-        printf("inf\n");
-    }
-}
-
-void test(Mamba *m) {
-    MambaWeights *w = &m->weights;
-    Config *p = &m->config;
-    int d_inner = p->dim * p->expand;
-    for (int i = 0; i < p->vocab_size * p->dim; i++) {
-        test_float(w->token_embedding_table[i]);
-    }
-    for (unsigned long long l = 0; l < p->n_layers; l++) {
-        printf("%lld\n", l);
-        for (int i = 0; i < p->dim; i++) {
-            test_float(w->rms_weight[i + l * p->dim]);
-        }
-
-        for (int i = 0; i < p->dim * (d_inner * 2); i++) {
-            test_float(w->in_proj_weight[i + l * p->dim * (d_inner * 2)]);
-        }
-
-        for (int i = 0; i < p->d_conv * d_inner; i++) {
-            test_float(w->conv1d_weight[i + l * p->d_conv * d_inner]);
-        }
-        for (int i = 0; i < d_inner; i++) {
-            test_float(w->conv1d_bias[i + l * d_inner]);
-        }
-        for (int i = 0; i < d_inner * (p->dt_rank + p->d_state * 2); i++) {
-            test_float(w->x_proj_weight[i + l * d_inner * (p->dt_rank + p->d_state * 2)]);
-        }
-        for (int i = 0; i < d_inner * p->dt_rank; i++) {
-            test_float(w->dt_proj_weight[i + l * d_inner * p->dt_rank]);
-        }
-
-        for (int i = 0; i < d_inner; i++) {
-            test_float(w->dt_proj_bias[i + l * d_inner]);
-        }
-        for (int i = 0; i < d_inner * p->dim; i++) {
-            test_float(w->out_proj_weight[i + l * d_inner * p->dim]);
-        }
-        for (int i = 0; i < d_inner * p->d_state; i++) {
-            test_float(w->A_log[i + l * d_inner * p->d_state]);
-        }
-        for (int i = 0; i < d_inner; i++) {
-            test_float(w->D[i + l * d_inner]);
-        }
-    }
-    for (int i = 0; i < p->dim * 1; i++) {
-        test_float(w->rms_final_weight[i]);
-    }
-}
-
 int main(int argc, char **argv) {
     char *checkpoint_path = "mamba-130m.bin";
     Mamba mamba;
@@ -758,21 +1009,32 @@ int main(int argc, char **argv) {
     // There are 50010 merges
     build_tokenizer(&tokenizer, "tokenizer.bin", 50009);
 
-    char *text;
-    text = (char *)malloc(33 * sizeof(char));
-    strcpy(text, "<|user|>\nhello world! I am here.");
-    text[32] = '\0';
-    int num_prompt_tokens = 0;
-    int *prompt_tokens = (int *)malloc((strlen(text) + 3) * sizeof(int));  // +3 for '\0', ?BOS, ?EOS
-    encode(&tokenizer, text, 1, 1, prompt_tokens, &num_prompt_tokens);
+    // default hyperparameters
+    float temperature = 1.0f;
+    float topp = 0.9f;
+    unsigned long long rng_seed = time(NULL);
+    int steps = 256;
+    char *prompt = NULL;
+    char *tokenizer_path = "tokenizer.bin";
+    char *mode = "chat";
+    char *system_prompt = NULL;
 
-    float *logits = forward(&mamba, prompt_tokens[3], 0);
-    for (int i = 0; i < mamba.config.vocab_size; i++) {
-        printf("%f ", logits[i]);
+    // build the Sampler
+    Sampler sampler;
+    build_sampler(&sampler, mamba.config.vocab_size, temperature, topp, rng_seed);
+
+    // run
+    if (strcmp(mode, "generate") == 0) {
+        generate(&mamba, &tokenizer, &sampler, prompt, steps);
+    } else if (strcmp(mode, "chat") == 0) {
+        chat(&mamba, &tokenizer, &sampler, prompt, system_prompt, steps);
+    } else {
+        fprintf(stderr, "unknown mode: %s\n", mode);
+        error_usage();
     }
-    free(text);
-    free(prompt_tokens);
+
     free_tokenizer(&tokenizer);
     free_mamba(&mamba);
     return 0;
 }
+#endif
