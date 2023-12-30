@@ -2,13 +2,14 @@
 *.bin
 *.bin:*
 
-# Exexcutables
+# Build files
 *.exe
-
-# Out files
 *.out
+run
 
 # VS Code files
 /.vscode
+*.editorconfig
 
+# File copies
 *.copy
