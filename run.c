@@ -30,38 +30,38 @@ typedef struct {
 } Config;
 
 typedef struct {
-    float *token_embedding_table;
-    float *rms_weight;
-    float *in_proj_weight;
-    float *conv1d_weight;
-    float *conv1d_bias;
-    float *x_proj_weight;
-    float *dt_proj_weight;
-    float *dt_proj_bias;
-    float *out_proj_weight;
-    float *A_log;
-    float *D;
-    float *rms_final_weight;
-    float *wcls;
+    float* token_embedding_table;
+    float* rms_weight;
+    float* in_proj_weight;
+    float* conv1d_weight;
+    float* conv1d_bias;
+    float* x_proj_weight;
+    float* dt_proj_weight;
+    float* dt_proj_bias;
+    float* out_proj_weight;
+    float* A_log;
+    float* D;
+    float* rms_final_weight;
+    float* wcls;
 } MambaWeights;
 
 typedef struct {
     // current wave of activations
-    float *x;    // activation at current time stamp (dim,)
-    float *xb;   // same, but inside a residual branch (dim,)
-    float *xb2;  // an additional buffer just for convenience (d_inner,)
-    float *in_proj_out;
-    float *out_proj_out;
-    float *conv_out;
-    float *logits;  // output logits
+    float* x;    // activation at current time stamp (dim,)
+    float* xb;   // same, but inside a residual branch (dim,)
+    float* xb2;  // an additional buffer just for convenience (d_inner,)
+    float* in_proj_out;
+    float* out_proj_out;
+    float* conv_out;
+    float* logits;  // output logits
     // kv cache
-    float *conv_state;
-    float *x_ssm;
-    float *A;
-    float *x_proj_out;
-    float *delta;
-    float *deltaA;
-    float *deltaB_u;
+    float* conv_state;
+    float* x_ssm;
+    float* A;
+    float* x_proj_out;
+    float* delta;
+    float* deltaA;
+    float* deltaB_u;
 } RunState;
 
 typedef struct {
@@ -70,11 +70,11 @@ typedef struct {
     RunState state;        // buffers for the "wave" of activations in the forward pass
     // some more state needed to properly clean up the memory mapping (sigh)
     int fd;             // file descriptor for memory mapping
-    float *data;        // memory mapped data pointer
+    float* data;        // memory mapped data pointer
     ssize_t file_size;  // size of the checkpoint file in bytes
 } Mamba;
 
-void malloc_run_state(RunState *s, Config *p) {
+void malloc_run_state(RunState* s, Config* p) {
     int d_inner = p->dim * p->expand;
     // we calloc instead of malloc to keep valgrind happy
     s->x = calloc(p->dim, sizeof(float));
@@ -101,7 +101,7 @@ void malloc_run_state(RunState *s, Config *p) {
     }
 }
 
-void free_run_state(RunState *s) {
+void free_run_state(RunState* s) {
     free(s->x);
     free(s->xb);
     free(s->xb2);
@@ -118,7 +118,7 @@ void free_run_state(RunState *s) {
     free(s->deltaB_u);
 }
 
-void memory_map_weights(MambaWeights *w, Config *p, float *ptr, bool shared_weights) {
+void memory_map_weights(MambaWeights* w, Config* p, float* ptr, bool shared_weights) {
     int d_inner = p->dim * p->expand;
     // make sure the multiplications below are done in 64bit to fit the parameter counts of 13B+ models
     unsigned long long n_layers = p->n_layers;
@@ -149,8 +149,8 @@ void memory_map_weights(MambaWeights *w, Config *p, float *ptr, bool shared_weig
     w->wcls = shared_weights ? w->token_embedding_table : ptr;
 }
 
-void read_checkpoint(char *checkpoint, Config *config, MambaWeights *weights, int *fd, float **data, ssize_t *file_size) {
-    FILE *file = fopen(checkpoint, "rb");
+void read_checkpoint(char* checkpoint, Config* config, MambaWeights* weights, int* fd, float** data, ssize_t* file_size) {
+    FILE* file = fopen(checkpoint, "rb");
     uint32_t file_identifier;
     int version;
     if (!file) {
@@ -199,19 +199,19 @@ void read_checkpoint(char *checkpoint, Config *config, MambaWeights *weights, in
     }
 
     // First 256 bytes contain headers, so skip them
-    float *weights_ptr = *data + 256 / sizeof(float);
+    float* weights_ptr = *data + 256 / sizeof(float);
 
     memory_map_weights(weights, config, weights_ptr, shared_weights);
 }
 
-void build_mamba(Mamba *t, char *checkpoint_path) {
+void build_mamba(Mamba* t, char* checkpoint_path) {
     // read in the Config and the Weights from the checkpoint
     read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->fd, &t->data, &t->file_size);
     // allocate the RunState buffers
     malloc_run_state(&t->state, &t->config);
 }
 
-void free_mamba(Mamba *t) {
+void free_mamba(Mamba* t) {
     // close the memory mapping
     if (t->data != MAP_FAILED) {
         munmap(t->data, t->file_size);
@@ -226,7 +226,7 @@ void free_mamba(Mamba *t) {
 // ----------------------------------------------------------------------------
 // neural net blocks; the dynamics of the Mamba
 
-void rmsnorm(float *o, float *x, float *weight, int size) {
+void rmsnorm(float* o, float* x, float* weight, int size) {
     // calculate sum of squares
     float ss = 0.0f;
     for (int j = 0; j < size; j++) {
@@ -241,7 +241,7 @@ void rmsnorm(float *o, float *x, float *weight, int size) {
     }
 }
 
-void softmax(float *x, int size) {
+void softmax(float* x, int size) {
     // find max value (for numerical stability)
     float max_val = x[0];
     for (int i = 1; i < size; i++) {
@@ -261,7 +261,7 @@ void softmax(float *x, int size) {
     }
 }
 
-void matmul(float *xout, float *x, float *w, int n, int d) {
+void matmul(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     int i;
@@ -275,28 +275,30 @@ void matmul(float *xout, float *x, float *w, int n, int d) {
     }
 }
 
-void silu(float *x, int d) {
+void silu(float* x, int d) {
     // Swish: x * sigmoid(x)
+
     for (int i = 0; i < d; i++) {
-        float val = x[i];
-        val *= (1.0f / (1.0f + expf(-val)));
-        x[i] = val;
+        double val = x[i];
+        val *= (1.0 / (1.0 + exp(-val)));
+        x[i] = (float)val;
     }
 }
 
-void negexp(float *out, float *x, int d) {
+void negexp(float* out, float* x, int d) {
     for (int i = 0; i < d; i++) {
-        out[i] = -expf(x[i]);
+        double val = exp(x[i]);
+        out[i] = val > FLT_MAX ? -FLT_MAX : -(float)val;
     }
 }
 
-void softplus(float *x, int d) {
+void softplus(float* x, int d) {
     for (int i = 0; i < d; i++) {
         x[i] = (float)log(1.0 + exp((double)x[i]));
     }
 }
 
-void ssm(float *y, unsigned long long l, RunState *s, Config *p, MambaWeights *w) {
+void ssm(float* y, unsigned long long l, RunState* s, Config* p, MambaWeights* w) {
     int dim = p->dim;
     int d_state = p->d_state;
     int d_conv = p->d_conv;
@@ -305,24 +307,25 @@ void ssm(float *y, unsigned long long l, RunState *s, Config *p, MambaWeights *w
     int dt_rank = p->dt_rank;
     int max_seq_len = p->max_seq_len;
 
-    // SSM here
+    negexp(s->A, w->A_log + l * d_inner * d_state, d_inner * d_state);
     matmul(s->x_proj_out, s->conv_out, w->x_proj_weight + l * (dt_rank + 2 * d_state) * d_inner, d_inner, dt_rank + 2 * d_state);
 
-    negexp(s->A, w->A_log + l * d_inner * d_state, d_inner * d_state);
-    float *B = s->x_proj_out + dt_rank;
-    float *C = B + d_state;
+    float* B = s->x_proj_out + dt_rank;
+    float* C = B + d_state;
 
-    float *D = w->D + l * d_inner;
+    float* D = w->D + l * d_inner;
+
 
     matmul(s->delta, s->x_proj_out, w->dt_proj_weight + l * d_inner * dt_rank, dt_rank, d_inner);
     for (int i = 0; i < d_inner; i++) {
-        s->delta[i] += w->dt_proj_bias[i];
+        s->delta[i] += w->dt_proj_bias[l * d_inner + i];
     }
     softplus(s->delta, d_inner);
 
+    // selective scan here
     for (int i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
-            s->deltaA[i * d_state + j] = s->delta[i] * s->A[i * d_state + j];
+            s->deltaA[i * d_state + j] = expf(s->delta[i] * s->A[i * d_state + j]);
         }
     }
 
@@ -332,7 +335,6 @@ void ssm(float *y, unsigned long long l, RunState *s, Config *p, MambaWeights *w
         }
     }
 
-#pragma omp parallel for private(i)
     for (int i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
             s->x_ssm[l * d_inner * d_state + i * d_state + j] *= s->deltaA[i * d_state + j];
@@ -343,12 +345,12 @@ void ssm(float *y, unsigned long long l, RunState *s, Config *p, MambaWeights *w
     }
 }
 
-float *forward(Mamba *mamba, int token, int pos) {
+float* forward(Mamba* mamba, int token, int pos) {
     // a few convenience variables
-    Config *p = &mamba->config;
-    MambaWeights *w = &mamba->weights;
-    RunState *s = &mamba->state;
-    float *x = s->x;
+    Config* p = &mamba->config;
+    MambaWeights* w = &mamba->weights;
+    RunState* s = &mamba->state;
+    float* x = s->x;
     int dim = p->dim;
     int d_state = p->d_state;
     int d_conv = p->d_conv;
@@ -358,26 +360,30 @@ float *forward(Mamba *mamba, int token, int pos) {
     int max_seq_len = p->max_seq_len;
 
     // copy the token embedding into x
-    float *content_row = w->token_embedding_table + token * dim;
+    float* content_row = w->token_embedding_table + token * dim;
     memcpy(x, content_row, dim * sizeof(*x));
+
     for (unsigned long long l = 0; l < p->n_layers; l++) {
         rmsnorm(s->xb, x, w->rms_weight + l * dim, dim);
         matmul(s->in_proj_out, s->xb, w->in_proj_weight + l * dim * (d_inner * 2), dim, d_inner * 2);
-        float *res = s->in_proj_out + d_inner;
+        float* res = s->in_proj_out + d_inner;
 
         // set the conv state
+        // conv state is a array storing d_inner x (max_seq_len + d_conv - 1) in a column major order
+        // (for each layer)
         unsigned long long pos_idx = l * (max_seq_len + d_conv - 1) * d_inner + (pos + d_conv - 1) * d_inner;
         for (int i = 0; i < d_inner; i++) {
-            float val = s->in_proj_out[i];
-            s->conv_state[pos_idx + i] = val;
+            s->conv_state[pos_idx + i] = s->in_proj_out[i];
         }
 
         // Convolve
         unsigned long long layer_idx = l * (max_seq_len + d_conv - 1) * d_inner;
         for (int i = 0; i < d_inner; i++) {
+            float val = 0.0f;
             for (int j = pos, j_conv = 0; j < pos + d_conv; j++, j_conv++) {
-                s->conv_out[i] = w->conv1d_weight[l * d_inner * d_conv + i * d_conv + j_conv] * s->conv_state[layer_idx + j * d_inner + i];
+                val += w->conv1d_weight[l * d_inner * d_conv + i * d_conv + j_conv] * s->conv_state[layer_idx + j * d_inner + i];
             }
+            s->conv_out[i] = val;
         }
 
         // Conv bias
@@ -387,9 +393,10 @@ float *forward(Mamba *mamba, int token, int pos) {
 
         silu(s->conv_out, d_inner);
 
-        float *y = calloc(d_inner, sizeof(float));
+        float* y = calloc(d_inner, sizeof(float));
         ssm(y, l, s, p, w);
 
+        // y = y * F.silu(res)
         for (int i = 0; i < d_inner; i++) {
             float val = res[i];
             // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
@@ -416,36 +423,36 @@ float *forward(Mamba *mamba, int token, int pos) {
 // The Byte Pair Encoding (BPE) Tokenizer that translates strings <-> tokens
 
 typedef struct {
-    char *str;
+    char* str;
     int id;
 } TokenIndex;
 
 typedef struct {
-    char **vocab;
-    float *vocab_scores;
-    TokenIndex *sorted_vocab;
+    char** vocab;
+    float* vocab_scores;
+    TokenIndex* sorted_vocab;
     int vocab_size;
     unsigned int max_token_length;
     unsigned char byte_pieces[512];  // stores all single-byte strings
 } Tokenizer;
 
-int compare_tokens(const void *a, const void *b) {
-    return strcmp(((TokenIndex *)a)->str, ((TokenIndex *)b)->str);
+int compare_tokens(const void* a, const void* b) {
+    return strcmp(((TokenIndex*)a)->str, ((TokenIndex*)b)->str);
 }
 
-void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size) {
+void build_tokenizer(Tokenizer* t, char* tokenizer_path, int vocab_size) {
     // i should have written the vocab_size into the tokenizer file... sigh
     t->vocab_size = vocab_size;
     // malloc space to hold the scores and the strings
-    t->vocab = (char **)malloc(vocab_size * sizeof(char *));
-    t->vocab_scores = (float *)malloc(vocab_size * sizeof(float));
+    t->vocab = (char**)malloc(vocab_size * sizeof(char*));
+    t->vocab_scores = (float*)malloc(vocab_size * sizeof(float));
     t->sorted_vocab = NULL;  // initialized lazily
     for (int i = 0; i < 256; i++) {
         t->byte_pieces[i * 2] = (unsigned char)i;
         t->byte_pieces[i * 2 + 1] = '\0';
     }
     // read in the file
-    FILE *file = fopen(tokenizer_path, "rb");
+    FILE* file = fopen(tokenizer_path, "rb");
     if (!file) {
         fprintf(stderr, "couldn't load %s\n", tokenizer_path);
         exit(EXIT_FAILURE);
@@ -465,7 +472,7 @@ void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size) {
             fprintf(stderr, "failed read517\n");
             exit(EXIT_FAILURE);
         }
-        t->vocab[i] = (char *)malloc(len + 1);
+        t->vocab[i] = (char*)malloc(len + 1);
         if (fread(t->vocab[i], len, 1, file) != 1) {
             fprintf(stderr, "failed read522\n");
             exit(EXIT_FAILURE);
@@ -475,7 +482,7 @@ void build_tokenizer(Tokenizer *t, char *tokenizer_path, int vocab_size) {
     fclose(file);
 }
 
-void free_tokenizer(Tokenizer *t) {
+void free_tokenizer(Tokenizer* t) {
     for (int i = 0; i < t->vocab_size; i++) {
         free(t->vocab[i]);
     }
@@ -484,8 +491,8 @@ void free_tokenizer(Tokenizer *t) {
     free(t->sorted_vocab);
 }
 
-char *decode(Tokenizer *t, int prev_token, int token) {
-    char *piece = t->vocab[token];
+char* decode(Tokenizer* t, int prev_token, int token) {
+    char* piece = t->vocab[token];
     // following BOS (1) token, sentencepiece decoder strips any leading whitespace (see PR #89)
     if (prev_token == 1 && piece[0] == ' ') {
         piece++;
@@ -494,12 +501,12 @@ char *decode(Tokenizer *t, int prev_token, int token) {
     // parse this and convert and return the actual byte
     unsigned char byte_val;
     if (sscanf(piece, "<0x%02hhX>", &byte_val) == 1) {
-        piece = (char *)t->byte_pieces + byte_val * 2;
+        piece = (char*)t->byte_pieces + byte_val * 2;
     }
     return piece;
 }
 
-void safe_printf(char *piece) {
+void safe_printf(char* piece) {
     // piece might be a raw byte token, and we only want to print printable chars or whitespace
     // because some of the other bytes can be various control codes, backspace, etc.
     if (piece == NULL) {
@@ -514,17 +521,18 @@ void safe_printf(char *piece) {
             return;  // bad byte, don't print it
         }
     }
+
     printf("%s", piece);
 }
 
-int str_lookup(char *str, TokenIndex *sorted_vocab, int vocab_size) {
+int str_lookup(char* str, TokenIndex* sorted_vocab, int vocab_size) {
     // efficiently find the perfect match for str in vocab, return its index or -1 if not found
-    TokenIndex tok = {.str = str};  // acts as the key to search for
-    TokenIndex *res = bsearch(&tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens);
+    TokenIndex tok = { .str = str };  // acts as the key to search for
+    TokenIndex* res = bsearch(&tok, sorted_vocab, vocab_size, sizeof(TokenIndex), compare_tokens);
     return res != NULL ? res->id : -1;
 }
 
-void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *n_tokens) {
+void encode(Tokenizer* t, char* text, int8_t bos, int8_t eos, int* tokens, int* n_tokens) {
     // encode the string text (input) into an upper-bound preallocated tokens[] array
     // bos != 0 means prepend the BOS token (=1), eos != 0 means append the EOS token (=2)
     if (text == NULL) {
@@ -544,7 +552,7 @@ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *
 
     // create a temporary buffer that will store merge candidates of always two consecutive tokens
     // *2 for concat, +1 for null terminator +2 for UTF8 (in case max_token_length is 1)
-    char *str_buffer = malloc((t->max_token_length * 2 + 1 + 2) * sizeof(char));
+    char* str_buffer = malloc((t->max_token_length * 2 + 1 + 2) * sizeof(char));
     size_t str_len = 0;
 
     // start at 0 tokens
@@ -571,7 +579,7 @@ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *
     // U+10000	U+10FFFF    11110xxx	10xxxxxx	10xxxxxx	10xxxxxx
 
     // process the raw (UTF-8) byte sequence of the input string
-    for (char *c = text; *c != '\0'; c++) {
+    for (char* c = text; *c != '\0'; c++) {
         // reset buffer if the current byte is ASCII or a leading byte
         // 0xC0 is 11000000, so (*c & 0xC0) keeps the first 2 bits and zeros the rest
         // 0x80 is 10000000
@@ -599,7 +607,8 @@ void encode(Tokenizer *t, char *text, int8_t bos, int8_t eos, int *tokens, int *
         if (id != -1) {
             // we found this codepoint in vocab, add it as a token
             tokens[(*n_tokens)++] = id;
-        } else {
+        }
+        else {
             // byte_fallback encoding: just encode each byte as a token
             // +2 is here because the first 2 vocab elements are <unk>, <s>, </s>
             // so the individual bytes only start at index 2
@@ -659,13 +668,13 @@ typedef struct {
 
 typedef struct {
     int vocab_size;
-    ProbIndex *probindex;  // buffer used in top-p sampling
+    ProbIndex* probindex;  // buffer used in top-p sampling
     float temperature;
     float topp;
     unsigned long long rng_state;
 } Sampler;
 
-int sample_argmax(float *probabilities, int n) {
+int sample_argmax(float* probabilities, int n) {
     // return the index that has the highest probability
     int max_i = 0;
     float max_p = probabilities[0];
@@ -678,7 +687,7 @@ int sample_argmax(float *probabilities, int n) {
     return max_i;
 }
 
-int sample_mult(float *probabilities, int n, float coin) {
+int sample_mult(float* probabilities, int n, float coin) {
     // sample index from probabilities (they must sum to 1!)
     // coin is a random number in [0, 1), usually from random_f32()
     float cdf = 0.0f;
@@ -691,15 +700,15 @@ int sample_mult(float *probabilities, int n, float coin) {
     return n - 1;  // in case of rounding errors
 }
 
-int compare(const void *a, const void *b) {
-    ProbIndex *a_ = (ProbIndex *)a;
-    ProbIndex *b_ = (ProbIndex *)b;
+int compare(const void* a, const void* b) {
+    ProbIndex* a_ = (ProbIndex*)a;
+    ProbIndex* b_ = (ProbIndex*)b;
     if (a_->prob > b_->prob) return -1;
     if (a_->prob < b_->prob) return 1;
     return 0;
 }
 
-int sample_topp(float *probabilities, int n, float topp, ProbIndex *probindex, float coin) {
+int sample_topp(float* probabilities, int n, float topp, ProbIndex* probindex, float coin) {
     // top-p sampling (or "nucleus sampling") samples from the smallest set of
     // tokens that exceed probability topp. This way we never sample tokens that
     // have very low probabilities and are less likely to go "off the rails".
@@ -742,7 +751,7 @@ int sample_topp(float *probabilities, int n, float topp, ProbIndex *probindex, f
     return probindex[last_idx].index;  // in case of rounding errors
 }
 
-void build_sampler(Sampler *sampler, int vocab_size, float temperature, float topp, unsigned long long rng_seed) {
+void build_sampler(Sampler* sampler, int vocab_size, float temperature, float topp, unsigned long long rng_seed) {
     sampler->vocab_size = vocab_size;
     sampler->temperature = temperature;
     sampler->topp = topp;
@@ -751,28 +760,29 @@ void build_sampler(Sampler *sampler, int vocab_size, float temperature, float to
     sampler->probindex = malloc(sampler->vocab_size * sizeof(ProbIndex));
 }
 
-void free_sampler(Sampler *sampler) {
+void free_sampler(Sampler* sampler) {
     free(sampler->probindex);
 }
 
-unsigned int random_u32(unsigned long long *state) {
+unsigned int random_u32(unsigned long long* state) {
     // xorshift rng: https://en.wikipedia.org/wiki/Xorshift#xorshift.2A
     *state ^= *state >> 12;
     *state ^= *state << 25;
     *state ^= *state >> 27;
     return (*state * 0x2545F4914F6CDD1Dull) >> 32;
 }
-float random_f32(unsigned long long *state) {  // random float32 in [0,1)
+float random_f32(unsigned long long* state) {  // random float32 in [0,1)
     return (random_u32(state) >> 8) / 16777216.0f;
 }
 
-int sample(Sampler *sampler, float *logits) {
+int sample(Sampler* sampler, float* logits) {
     // sample the token given the logits and some hyperparameters
     int next;
     if (sampler->temperature == 0.0f) {
         // greedy argmax sampling: take the token with the highest probability
         next = sample_argmax(logits, sampler->vocab_size);
-    } else {
+    }
+    else {
         // apply the temperature to the logits
         for (int q = 0; q < sampler->vocab_size; q++) {
             logits[q] /= sampler->temperature;
@@ -785,7 +795,8 @@ int sample(Sampler *sampler, float *logits) {
         if (sampler->topp <= 0 || sampler->topp >= 1) {
             // simply sample from the predicted probability distribution
             next = sample_mult(logits, sampler->vocab_size, coin);
-        } else {
+        }
+        else {
             // top-p (nucleus) sampling, clamping the least likely tokens to zero
             next = sample_topp(logits, sampler->vocab_size, sampler->topp, sampler->probindex, coin);
         }
@@ -806,15 +817,15 @@ long time_in_ms() {
 // ----------------------------------------------------------------------------
 // generation loop
 
-void generate(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler, char *prompt, int steps) {
-    char *empty_prompt = "";
+void generate(Mamba* mamba, Tokenizer* tokenizer, Sampler* sampler, char* prompt, int steps) {
+    char* empty_prompt = "";
     if (prompt == NULL) {
         prompt = empty_prompt;
     }
 
     // encode the (string) prompt into tokens sequence
     int num_prompt_tokens = 0;
-    int *prompt_tokens = (int *)malloc((strlen(prompt) + 3) * sizeof(int));  // +3 for '\0', ?BOS, ?EOS
+    int* prompt_tokens = (int*)malloc((strlen(prompt) + 3) * sizeof(int));  // +3 for '\0', ?BOS, ?EOS
     encode(tokenizer, prompt, 1, 0, prompt_tokens, &num_prompt_tokens);
     if (num_prompt_tokens < 1) {
         fprintf(stderr, "something is wrong, expected at least 1 prompt token\n");
@@ -828,13 +839,14 @@ void generate(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler, char *prompt
     int pos = 0;                   // position in the sequence
     while (pos < steps) {
         // forward the mamba to get logits for the next token
-        float *logits = forward(mamba, token, pos);
+        float* logits = forward(mamba, token, pos);
 
         // advance the state machine
         if (pos < num_prompt_tokens - 1) {
             // if we are still processing the input prompt, force the next prompt token
             next = prompt_tokens[pos + 1];
-        } else {
+        }
+        else {
             // otherwise sample the next token from the logits
             next = sample(sampler, logits);
         }
@@ -846,7 +858,7 @@ void generate(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler, char *prompt
         }
 
         // print the token as string, decode it with the Tokenizer object
-        char *piece = decode(tokenizer, token, next);
+        char* piece = decode(tokenizer, token, next);
         safe_printf(piece);  // same as printf("%s", piece), but skips "unsafe" bytes
         fflush(stdout);
         token = next;
@@ -867,7 +879,7 @@ void generate(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler, char *prompt
     free(prompt_tokens);
 }
 
-void read_stdin(const char *guide, char *buffer, size_t bufsize) {
+void read_stdin(const char* guide, char* buffer, size_t bufsize) {
     // read a line from stdin, up to but not including \n
     printf("%s", guide);
     if (fgets(buffer, bufsize, stdin) != NULL) {
@@ -880,19 +892,16 @@ void read_stdin(const char *guide, char *buffer, size_t bufsize) {
 
 // ----------------------------------------------------------------------------
 // chat loop
-// I manually inspected the tokens for a few chat conversations compared to
-// python reference and that seemed ok, but this was not thoroughly tested and
-// is not safely implemented, it's more a proof of concept atm.
 
-void chat(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler,
-          char *cli_user_prompt, char *cli_system_prompt, int steps) {
+void chat(Mamba* mamba, Tokenizer* tokenizer, Sampler* sampler,
+    char* cli_user_prompt, char* cli_system_prompt, int steps) {
     // buffers for reading the system prompt and user prompt from stdin
     // you'll notice they are soomewhat haphazardly and unsafely set atm
     char system_prompt[512];
     char user_prompt[512];
     char rendered_prompt[1152];
     int num_prompt_tokens = 0;
-    int *prompt_tokens = (int *)malloc(1152 * sizeof(int));
+    int* prompt_tokens = (int*)malloc(1152 * sizeof(int));
     int user_idx;
 
     // start the main loop
@@ -900,6 +909,12 @@ void chat(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler,
     int next;              // will store the next token in the sequence
     int token;             // stores the current token to feed into the mamba
     int prev_token;
+
+    // counts the number of EOS tokens. 
+    // Two tokens means the Assistant's turn is over
+    // two tokens are needed, one for the BOS token, and one for the EOS token
+    int eos_token_count = 0;
+
     int pos = 0;  // position in the sequence
     while (pos < steps) {
         // when it is the user's turn to contribute tokens to the dialog...
@@ -910,7 +925,8 @@ void chat(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler,
                 if (cli_system_prompt == NULL) {
                     // system prompt was not passed in, attempt to get it from stdin
                     read_stdin("Enter system prompt (optional): ", system_prompt, sizeof(system_prompt));
-                } else {
+                }
+                else {
                     // system prompt was passed in, use it
                     strcpy(system_prompt, cli_system_prompt);
                 }
@@ -919,7 +935,8 @@ void chat(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler,
             if (pos == 0 && cli_user_prompt != NULL) {
                 // user prompt for position 0 was passed in, use it
                 strcpy(user_prompt, cli_user_prompt);
-            } else {
+            }
+            else {
                 // otherwise get user prompt from stdin
                 read_stdin("User: ", user_prompt, sizeof(user_prompt));
             }
@@ -927,7 +944,8 @@ void chat(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler,
             if (pos == 0 && system_prompt[0] != '\0') {
                 char system_template[] = "<|system|>\n%s";
                 sprintf(rendered_prompt, system_template, system_prompt, user_prompt);
-            } else {
+            }
+            else {
                 char user_template[] = "<|user|>\n<|assistant|>%s\n";
                 sprintf(rendered_prompt, user_template, user_prompt);
             }
@@ -942,27 +960,32 @@ void chat(Mamba *mamba, Tokenizer *tokenizer, Sampler *sampler,
         if (user_idx < num_prompt_tokens) {
             // if we are still processing the input prompt, force the next prompt token
             token = prompt_tokens[user_idx++];
-        } else {
+        }
+        else {
             // otherwise use the next token sampled from previous turn
             token = next;
         }
-        // EOS (=0) token ends the Assistant turn
-        if (token == 0 && pos != 0) {
+        // EOS (=0) token ends the Assistant turn, if eos_token_count >= 2
+        // If pos == 0, then the user has not entered any input yet, so we don't
+        eos_token_count++;
+        if (token == 0 && eos_token_count == 2) {
             user_turn = 1;
+            eos_token_count = 0;
         }
 
         // forward the mamba to get logits for the next token
-        float *logits = forward(mamba, token, pos);
+        float* logits = forward(mamba, token, pos);
         next = sample(sampler, logits);
         pos++;
 
         if (user_idx >= num_prompt_tokens && next != 0) {
             // the Assistant is responding, so print its output
-            char *piece = decode(tokenizer, token, next);
+            // printf("n");
+            char* piece = decode(tokenizer, token, next);
             safe_printf(piece);  // same as printf("%s", piece), but skips "unsafe" bytes
             fflush(stdout);
         }
-        if (next == 0) {
+        if (user_idx >= num_prompt_tokens && next == 0) {
             printf("\n");
         }
     }
@@ -989,7 +1012,7 @@ void error_usage() {
     exit(EXIT_FAILURE);
 }
 
-void print_config(Config *config) {
+void print_config(Config* config) {
     printf("\ndim = %d\n", config->dim);
     printf("n_layers = %d\n", config->n_layers);
     printf("vocab_size = %d\n", config->vocab_size);
@@ -1000,39 +1023,72 @@ void print_config(Config *config) {
     printf("max_seq_len = %d\n", config->max_seq_len);
 }
 
-int main(int argc, char **argv) {
-    char *checkpoint_path = "mamba-130m.bin";
-    Mamba mamba;
-    build_mamba(&mamba, "mamba-130m.bin");
-    // test(&mamba);
-    Tokenizer tokenizer;
-    // There are 50010 merges
-    build_tokenizer(&tokenizer, "tokenizer.bin", 50009);
+int main(int argc, char** argv) {
 
-    // default hyperparameters
-    float temperature = 1.0f;
-    float topp = 0.9f;
-    unsigned long long rng_seed = time(NULL);
-    int steps = 256;
-    char *prompt = NULL;
-    char *tokenizer_path = "tokenizer.bin";
-    char *mode = "chat";
-    char *system_prompt = NULL;
+    // default parameters
+    char* checkpoint_path = NULL;  // e.g. out/model.bin
+    char* tokenizer_path = "tokenizer.bin";
+    float temperature = 1.0f;   // 0.0 = greedy deterministic. 1.0 = original. don't set higher
+    float topp = 0.9f;          // top-p in nucleus sampling. 1.0 = off. 0.9 works well, but slower
+    int steps = 256;            // number of steps to run for
+    char* prompt = NULL;        // prompt string
+    unsigned long long rng_seed = 0; // seed rng with time by default
+    char* mode = "generate";    // generate|chat
+    char* system_prompt = NULL; // the (optional) system prompt to use in chat mode
+
+    // poor man's C argparse so we can override the defaults above from the command line
+    if (argc >= 2) { checkpoint_path = argv[1]; }
+    else { error_usage(); }
+    for (int i = 2; i < argc; i += 2) {
+        // do some basic validation
+        if (i + 1 >= argc) { error_usage(); } // must have arg after flag
+        if (argv[i][0] != '-') { error_usage(); } // must start with dash
+        if (strlen(argv[i]) != 2) { error_usage(); } // must be -x (one dash, one letter)
+        // read in the args
+        if (argv[i][1] == 't') { temperature = atof(argv[i + 1]); }
+        else if (argv[i][1] == 'p') { topp = atof(argv[i + 1]); }
+        else if (argv[i][1] == 's') { rng_seed = atoi(argv[i + 1]); }
+        else if (argv[i][1] == 'n') { steps = atoi(argv[i + 1]); }
+        else if (argv[i][1] == 'i') { prompt = argv[i + 1]; }
+        else if (argv[i][1] == 'z') { tokenizer_path = argv[i + 1]; }
+        else if (argv[i][1] == 'm') { mode = argv[i + 1]; }
+        else if (argv[i][1] == 'y') { system_prompt = argv[i + 1]; }
+        else { error_usage(); }
+    }
+
+    // parameter validation/overrides
+    if (rng_seed <= 0) rng_seed = (unsigned int)time(NULL);
+    if (temperature < 0.0) temperature = 0.0;
+    if (topp < 0.0 || 1.0 < topp) topp = 0.9;
+    if (steps < 0) steps = 0;
+
+    // build the Mamba via the model .bin file
+    Mamba mamba;
+    build_mamba(&mamba, checkpoint_path);
+    if (steps == 0 || steps > mamba.config.max_seq_len) steps = mamba.config.max_seq_len; // ovrerride to ~max length
+
+    // build the Tokenizer via the tokenizer .bin file
+    Tokenizer tokenizer;
+    build_tokenizer(&tokenizer, tokenizer_path, 50245);
 
     // build the Sampler
     Sampler sampler;
     build_sampler(&sampler, mamba.config.vocab_size, temperature, topp, rng_seed);
 
-    // run
+    // run!
     if (strcmp(mode, "generate") == 0) {
         generate(&mamba, &tokenizer, &sampler, prompt, steps);
-    } else if (strcmp(mode, "chat") == 0) {
+    }
+    else if (strcmp(mode, "chat") == 0) {
         chat(&mamba, &tokenizer, &sampler, prompt, system_prompt, steps);
-    } else {
+    }
+    else {
         fprintf(stderr, "unknown mode: %s\n", mode);
         error_usage();
     }
 
+    // memory cleanup
+    free_sampler(&sampler);
     free_tokenizer(&tokenizer);
     free_mamba(&mamba);
     return 0;
