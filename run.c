@@ -308,8 +308,8 @@ void ssm(float* y, unsigned long long l, RunState* s, Config* p, MambaWeights* w
     int max_seq_len = p->max_seq_len;
 
     negexp(s->A, w->A_log + l * d_inner * d_state, d_inner * d_state);
-    matmul(s->x_proj_out, s->conv_out, w->x_proj_weight + l * (dt_rank + 2 * d_state) * d_inner, d_inner, dt_rank + 2 * d_state);
 
+    matmul(s->x_proj_out, s->conv_out, w->x_proj_weight + l * (dt_rank + 2 * d_state) * d_inner, d_inner, dt_rank + 2 * d_state);
     float* B = s->x_proj_out + dt_rank;
     float* C = B + d_state;
 
@@ -323,19 +323,23 @@ void ssm(float* y, unsigned long long l, RunState* s, Config* p, MambaWeights* w
     softplus(s->delta, d_inner);
 
     // selective scan here
-    for (int i = 0; i < d_inner; i++) {
+    int i;
+#pragma omp parallel for private(i)
+    for (i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
             s->deltaA[i * d_state + j] = expf(s->delta[i] * s->A[i * d_state + j]);
         }
     }
 
-    for (int i = 0; i < d_inner; i++) {
+#pragma omp parallel for private(i)
+    for (i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
             s->deltaB_u[i * d_state + j] = s->delta[i] * B[j] * s->conv_out[i];
         }
     }
 
-    for (int i = 0; i < d_inner; i++) {
+#pragma omp parallel for private(i)
+    for (i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
             s->x_ssm[l * d_inner * d_state + i * d_state + j] *= s->deltaA[i * d_state + j];
             s->x_ssm[l * d_inner * d_state + i * d_state + j] += s->deltaB_u[i * d_state + j];
