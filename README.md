@@ -21,7 +21,7 @@ make runomp
 ```
 Other build commands are listed inside [Makefile](https://github.com/SalmanHabeeb/mamba-inference-in-C/blob/main/Makefile)
 
-Models can be downloaded from this [link] manually(https://drive.google.com/drive/folders/1Ls-_WnTxlR9fvf8Mfii1B3Idf5M1jgES?usp=sharing), or using gdown:
+Models can be downloaded from this [link](https://drive.google.com/drive/folders/1Ls-_WnTxlR9fvf8Mfii1B3Idf5M1jgES?usp=sharing) manually, or using gdown:
 
 ```
 # For model
