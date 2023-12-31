@@ -988,7 +988,6 @@ void chat(Mamba* mamba, Tokenizer* tokenizer, Sampler* sampler,
         // EOS (=0) token ends the Assistant turn, if eos_token_count == 1
         if (next == 0 && user_turn == 0 && eos_token_count == 1) {
             user_turn = 1;
-            printf("\n%d\n", eos_token_count);
             eos_token_count = 0;
         }
 
