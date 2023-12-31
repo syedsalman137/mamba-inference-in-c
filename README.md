@@ -1,4 +1,4 @@
-# mamba-inference-in-C
+# mamba-inference-in-c
 
 This repo runs Mamba models in C. We use tokenizer of Zephyr family of models, available on Huggingface.
 
