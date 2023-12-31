@@ -377,7 +377,8 @@ float* forward(Mamba* mamba, int token, int pos) {
 
         // Convolve
         unsigned long long layer_idx = l * (max_seq_len + d_conv - 1) * d_inner;
-        for (int i = 0; i < d_inner; i++) {
+        int i;
+        for (i = 0; i < d_inner; i++) {
             float val = 0.0f;
             for (int j = pos, j_conv = 0; j < pos + d_conv; j++, j_conv++) {
                 val += w->conv1d_weight[l * d_inner * d_conv + i * d_conv + j_conv] * s->conv_state[layer_idx + j * d_inner + i];
@@ -386,7 +387,7 @@ float* forward(Mamba* mamba, int token, int pos) {
         }
 
         // Conv bias
-        for (int i = 0; i < d_inner; i++) {
+        for (i = 0; i < d_inner; i++) {
             s->conv_out[i] += w->conv1d_bias[l * d_inner + i];
         }
 
@@ -396,7 +397,7 @@ float* forward(Mamba* mamba, int token, int pos) {
         ssm(y, l, s, p, w);
 
         // y = y * F.silu(res)
-        for (int i = 0; i < d_inner; i++) {
+        for (i = 0; i < d_inner; i++) {
             float val = res[i];
             // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
             val *= (1.0f / (1.0f + expf(-val)));
@@ -404,7 +405,7 @@ float* forward(Mamba* mamba, int token, int pos) {
         }
 
         matmul(s->out_proj_out, y, w->out_proj_weight + l * dim * d_inner, d_inner, dim);
-        for (int i = 0; i < dim; i++) {
+        for (i = 0; i < dim; i++) {
             // Residual connection
             x[i] += s->out_proj_out[i];
         }

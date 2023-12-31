@@ -2,6 +2,8 @@
 
 This repo runs Mamba models in C. We use tokenizer of Zephyr family of models, available on Huggingface.
 
+Runs about 20-25% slower 😔 than llama2.c when comparing mamba-130m vs llama-110m.
+
 ## Build and Run
 
 Clone the repo on your device
@@ -59,5 +61,5 @@ python export_tokenizer.py path/to/save/tokenizer --tokenizer "huggingface-token
 
 - [karpathy/llama2.c](https://github.com/karpathy/llama2.c) -- Basically this repository is unofficial fork of karpathy/llama2.c
 - [johnma2006/mamba-minimal](https://github.com/johnma2006/mamba-minimal) -- Inspired mamba implementation
-- [havenhq/mamba-chat](https://github.com/havenhq/mamba-chat) -- For chat-finetuned models
+- [havenhq/mamba-chat](https://github.com/havenhq/mamba-chat) -- For chat-finetuning of models
 - [state-spaces/mamba](https://github.com/state-spaces/mamba)
