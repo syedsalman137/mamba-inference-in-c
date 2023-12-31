@@ -43,7 +43,7 @@ OMP_NUM_THREADS=2 ./run "path/to/model" -m chat
 
 ## Models
 
-You can use the following [model](). Also, models can be exported to required bin format by running
+Also, models can be exported to required bin format by running
 
 ```
 python export_model.py path/to/save/model --checkpoint "huggingface-chkpoint"
