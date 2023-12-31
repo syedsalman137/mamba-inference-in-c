@@ -33,7 +33,7 @@ def export_mamba_for_c(model, filepath):
                          max_seq_len)
     out_file.write(header)
 
-    # 2) write some other flags
+    # 2) write some other flags and padding
     shared_classifier = torch.equal(model.embedding.weight, model.lm_head.weight)
     out_file.write(struct.pack('B', int(shared_classifier)))
     pad = 256 - out_file.tell() # pad rest with zeros; tell returns current pos
@@ -73,6 +73,6 @@ def model_export(checkpoint, file_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("filepath", type=str, help="the output filepath")
-    parser.add_argument("--checkpoint", type=str, help="huggingface model", default="state-spaces/mamba-130m")
+    parser.add_argument("--checkpoint", type=str, help="huggingface model", default="SalmanHabeeb/mamba-130m-1000")
     args = parser.parse_args()
     model_export(args.checkpoint, args.filepath)

@@ -27,7 +27,6 @@ def export_tokenizer_for_c(tokenizer, filepath):
       try:
         s = tokenizer.vocab_size - merge_data.index(t)
       except:
-        print(t)
         s = -1
       if i == tokenizer.bos_token_id:
           t = '\n<s>\n'
@@ -46,16 +45,18 @@ def export_tokenizer_for_c(tokenizer, filepath):
 
   # # write to a binary file
   with open(filepath, 'wb') as f:
+      f.write(struct.pack("I", tokenizer.vocab_size))
       f.write(struct.pack("I", max_token_length))
       for token_bytes, score in zip(tokens, scores):
           f.write(struct.pack("fI", score, len(token_bytes)))
           f.write(token_bytes)
+  
+  print(f"Wrote tokenizer in {filepath}")
 
-def tokenizer_export(tokenizer_name, chat_template, filepath):
+def tokenizer_export(tokenizer_name, filepath):
   tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
   tokenizer.eos_token = "<|endoftext|>"
   tokenizer.pad_token = tokenizer.eos_token
-  tokenizer.chat_template = AutoTokenizer.from_pretrained(chat_template).chat_template
   export_tokenizer_for_c(tokenizer, filepath)
 
 
@@ -63,6 +64,5 @@ if __name__ == "__main__":
   parser = argparse.ArgumentParser()
   parser.add_argument("filepath", type=str, help="output file path")
   parser.add_argument("--tokenizer", type=str, help="Huggingface path to tokenizer", default="EleutherAI/gpt-neox-20b")
-  parser.add_argument("--chat-template", type=str, help="Huggingface path to chat-template", default="HuggingFaceH4/zephyr-7b-beta")
   args = parser.parse_args()
-  tokenizer_export(args.tokenizer, args.chat_template, args.filepath)
+  tokenizer_export(args.tokenizer, args.filepath)

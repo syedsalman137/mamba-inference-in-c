@@ -19,9 +19,9 @@
 #endif
 
 typedef struct {
-    int dim;
     int n_layers;
     int vocab_size;
+    int dim;
     int d_state;
     int d_conv;
     int expand;
@@ -155,18 +155,6 @@ void read_checkpoint(char* checkpoint, Config* config, MambaWeights* weights, in
     int version;
     if (!file) {
         fprintf(stderr, "Couldn't open file %s\n", checkpoint);
-        exit(EXIT_FAILURE);
-    }
-
-    // Read in file identifier
-    if (fread(&file_identifier, sizeof(uint32_t), 1, file) != 1) {
-        fprintf(stderr, "Error reading header %s\n", checkpoint);
-        exit(EXIT_FAILURE);
-    }
-
-    // Read in file version
-    if (fread(&version, sizeof(int), 1, file) != 1) {
-        fprintf(stderr, "Error reading header %s\n", checkpoint);
         exit(EXIT_FAILURE);
     }
 
@@ -451,41 +439,49 @@ int compare_tokens(const void* a, const void* b) {
     return strcmp(((TokenIndex*)a)->str, ((TokenIndex*)b)->str);
 }
 
-void build_tokenizer(Tokenizer* t, char* tokenizer_path, int vocab_size) {
+void build_tokenizer(Tokenizer* t, char* tokenizer_path) {
     // i should have written the vocab_size into the tokenizer file... sigh
-    t->vocab_size = vocab_size;
-    // malloc space to hold the scores and the strings
-    t->vocab = (char**)malloc(vocab_size * sizeof(char*));
-    t->vocab_scores = (float*)malloc(vocab_size * sizeof(float));
-    t->sorted_vocab = NULL;  // initialized lazily
-    for (int i = 0; i < 256; i++) {
-        t->byte_pieces[i * 2] = (unsigned char)i;
-        t->byte_pieces[i * 2 + 1] = '\0';
-    }
+    // t->vocab_size = vocab_size;
     // read in the file
     FILE* file = fopen(tokenizer_path, "rb");
     if (!file) {
         fprintf(stderr, "couldn't load %s\n", tokenizer_path);
         exit(EXIT_FAILURE);
     }
-    // fprintf(stderr, "%s", tokenizer_path);
-    if (fread(&t->max_token_length, sizeof(int32_t), 1, file) != 1) {
-        fprintf(stderr, "failed read509\n");
+
+    if (fread(&t->vocab_size, sizeof(int32_t), 1, file) != 1) {
+        fprintf(stderr, "failed read\n");
         exit(EXIT_FAILURE);
     }
+
+    // malloc space to hold the scores and the strings
+    t->vocab = (char**)malloc(t->vocab_size * sizeof(char*));
+    t->vocab_scores = (float*)malloc(t->vocab_size * sizeof(float));
+    t->sorted_vocab = NULL;  // initialized lazily
+
+    for (int i = 0; i < 256; i++) {
+        t->byte_pieces[i * 2] = (unsigned char)i;
+        t->byte_pieces[i * 2 + 1] = '\0';
+    }
+
+    if (fread(&t->max_token_length, sizeof(int32_t), 1, file) != 1) {
+        fprintf(stderr, "failed read\n");
+        exit(EXIT_FAILURE);
+    }
+
     int len;
-    for (int i = 0; i < vocab_size; i++) {
+    for (int i = 0; i < t->vocab_size; i++) {
         if (fread(t->vocab_scores + i, sizeof(float), 1, file) != 1) {
-            fprintf(stderr, "failed read513, %f\n", FLT_MAX);
+            fprintf(stderr, "failed read, %f\n", FLT_MAX);
             exit(EXIT_FAILURE);
         }
         if (fread(&len, sizeof(int32_t), 1, file) != 1) {
-            fprintf(stderr, "failed read517\n");
+            fprintf(stderr, "failed read\n");
             exit(EXIT_FAILURE);
         }
         t->vocab[i] = (char*)malloc(len + 1);
         if (fread(t->vocab[i], len, 1, file) != 1) {
-            fprintf(stderr, "failed read522\n");
+            fprintf(stderr, "failed read\n");
             exit(EXIT_FAILURE);
         }
         t->vocab[i][len] = '\0';  // add the string terminating token
@@ -951,6 +947,10 @@ void chat(Mamba* mamba, Tokenizer* tokenizer, Sampler* sampler,
                 // otherwise get user prompt from stdin
                 read_stdin("User: ", user_prompt, sizeof(user_prompt));
             }
+
+            // exit command
+            if (strcmp(user_prompt, "exit") == 0) break;
+
             // render user/system prompts into the Llama 2 Chat schema
             if (pos == 0 && system_prompt[0] != '\0' && system_prompt[0] != '\n') {
                 char system_template[] = "<|system|>\n%s";
@@ -1036,7 +1036,6 @@ void print_config(Config* config) {
 }
 
 int main(int argc, char** argv) {
-
     // default parameters
     char* checkpoint_path = NULL;  // e.g. out/model.bin
     char* tokenizer_path = "tokenizer.bin";
@@ -1081,7 +1080,7 @@ int main(int argc, char** argv) {
 
     // build the Tokenizer via the tokenizer .bin file
     Tokenizer tokenizer;
-    build_tokenizer(&tokenizer, tokenizer_path, 50245);
+    build_tokenizer(&tokenizer, tokenizer_path);
 
     // build the Sampler
     Sampler sampler;
