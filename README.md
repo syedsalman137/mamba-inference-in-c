@@ -7,19 +7,19 @@ This repo runs Mamba models in C. We use tokenizer of Zephyr family of models, a
 Clone the repo on your device
 
 ```
-git clone https://github.com/SalmanHabeeb/mamba-inference-in-C.git
+git clone https://github.com/SalmanHabeeb/mamba-inference-in-c.git
 ```
 
 and navigate to the folder:
 ```
-cd mamba-inference-in-C
+cd mamba-inference-in-c
 ```
 
 Build using
 ```
 make runomp
 ```
-Other build commands are listed inside [Makefile](https://github.com/SalmanHabeeb/mamba-inference-in-C/blob/main/Makefile)
+Other build commands are listed inside [Makefile](https://github.com/SalmanHabeeb/mamba-inference-in-c/blob/main/Makefile)
 
 Models can be downloaded from this [link](https://drive.google.com/drive/folders/1Ls-_WnTxlR9fvf8Mfii1B3Idf5M1jgES?usp=sharing) manually, or using gdown:
 
