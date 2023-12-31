@@ -952,12 +952,12 @@ void chat(Mamba* mamba, Tokenizer* tokenizer, Sampler* sampler,
                 read_stdin("User: ", user_prompt, sizeof(user_prompt));
             }
             // render user/system prompts into the Llama 2 Chat schema
-            if (pos == 0 && system_prompt[0] != '\0') {
+            if (pos == 0 && system_prompt[0] != '\0' && system_prompt[0] != '\n') {
                 char system_template[] = "<|system|>\n%s";
                 sprintf(rendered_prompt, system_template, system_prompt, user_prompt);
             }
             else {
-                char user_template[] = "<|user|>\n<|assistant|>%s\n";
+                char user_template[] = "<|user|>\n%s\n<|assistant|>\n";
                 sprintf(rendered_prompt, user_template, user_prompt);
             }
             // encode the rendered prompt into tokens
@@ -976,22 +976,24 @@ void chat(Mamba* mamba, Tokenizer* tokenizer, Sampler* sampler,
             // otherwise use the next token sampled from previous turn
             token = next;
         }
-        // EOS (=0) token ends the Assistant turn, if eos_token_count >= 2
-        // If pos == 0, then the user has not entered any input yet, so we don't
-        eos_token_count++;
-        if (token == 0 && eos_token_count == 2) {
-            user_turn = 1;
-            eos_token_count = 0;
-        }
 
         // forward the mamba to get logits for the next token
         float* logits = forward(mamba, token, pos);
         next = sample(sampler, logits);
         pos++;
 
+        if (user_turn == 0 && next == 0) {
+            eos_token_count++;
+        }
+        // EOS (=0) token ends the Assistant turn, if eos_token_count == 1
+        if (next == 0 && user_turn == 0 && eos_token_count == 1) {
+            user_turn = 1;
+            printf("\n%d\n", eos_token_count);
+            eos_token_count = 0;
+        }
+
         if (user_idx >= num_prompt_tokens && next != 0) {
             // the Assistant is responding, so print its output
-            // printf("n");
             char* piece = decode(tokenizer, token, next);
             safe_printf(piece);  // same as printf("%s", piece), but skips "unsafe" bytes
             fflush(stdout);
