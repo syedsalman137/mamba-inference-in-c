@@ -57,7 +57,7 @@ python export_tokenizer.py path/to/save/tokenizer --tokenizer "huggingface-token
 
 ## Attribution
 
-- [karpathy/llama2.c](https://github.com/karpathy/llama2.c) -- Basically everything is taken from here
+- [karpathy/llama2.c](https://github.com/karpathy/llama2.c) -- Basically this repository is unofficial fork of karpathy/llama2.c
 - [johnma2006/mamba-minimal](https://github.com/johnma2006/mamba-minimal) -- Inspired mamba implementation
 - [havenhq/mamba-chat](https://github.com/havenhq/mamba-chat) -- For chat-finetuned models
 - [state-spaces/mamba](https://github.com/state-spaces/mamba)
