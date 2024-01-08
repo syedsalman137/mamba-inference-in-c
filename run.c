@@ -330,8 +330,10 @@ void ssm(float* y, unsigned long long l, RunState* s, Config* p, MambaWeights* w
 #pragma omp parallel for private(i)
     for (i = 0; i < d_inner; i++) {
         for (int j = 0; j < d_state; j++) {
+
             s->x_ssm[l * d_inner * d_state + i * d_state + j] *= s->deltaA[i * d_state + j];
             s->x_ssm[l * d_inner * d_state + i * d_state + j] += s->deltaB_u[i * d_state + j];
+
             y[i] += s->x_ssm[l * d_inner * d_state + i * d_state + j] * C[j];
         }
         y[i] += s->conv_out[i] * D[i];
