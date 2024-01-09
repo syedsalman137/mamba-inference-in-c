@@ -135,6 +135,13 @@ void free_run_state(RunState* s) {
     free(s->delta);
     free(s->deltaA);
     free(s->deltaB_u);
+
+    free(s->xq.q);
+    free(s->xq.s);
+    free(s->hq.q);
+    free(s->hq.s);
+    free(s->x_proj_outq.q);
+    free(s->x_proj_outq.s);
 }
 
 // ----------------------------------------------------------------------------
@@ -225,9 +232,15 @@ void memory_map_weights(MambaWeights* w, Config* p, void* ptr, bool shared_weigh
 void read_checkpoint(char* checkpoint, Config* config, MambaWeights* weights, int* fd, float** data, ssize_t* file_size) {
     FILE* file = fopen(checkpoint, "rb");
     uint32_t file_identifier;
-    int version;
+    int version = 0;
     if (!file) {
         fprintf(stderr, "Couldn't open file %s\n", checkpoint);
+        exit(EXIT_FAILURE);
+    }
+
+    // read in the version no
+    if (fread(&version, sizeof(int), 1, file) != 1) {
+        fprintf(stderr, "Error reading version %s\n", checkpoint);
         exit(EXIT_FAILURE);
     }
 
@@ -249,7 +262,6 @@ void read_checkpoint(char* checkpoint, Config* config, MambaWeights* weights, in
         exit(EXIT_FAILURE);
     }
     GS = group_size;  // set as global, as it will be used in many places
-
     fseek(file, 0, SEEK_END);  // move file pointer to end of file
     *file_size = ftell(file);  // get the file size, in bytes
     fclose(file);
@@ -280,8 +292,8 @@ void build_mamba(Mamba* t, char* checkpoint_path) {
 void free_mamba(Mamba* t) {
     free(t->weights.q_tokens);
     free(t->weights.token_embedding_table);
-    free(t->weights.rms_weight);
-    free(t->weights.rms_final_weight);
+    // free(t->weights.rms_weight);
+    // free(t->weights.rms_final_weight);
     free(t->weights.in_proj_weight);
     free(t->weights.conv1d_weight);
     free(t->weights.conv1d_bias);
@@ -484,14 +496,16 @@ float* forward(Mamba* mamba, int token, int pos) {
         for (i = 0; i < d_inner; i++) {
             float val = 0.0f;
             for (int j = pos, j_conv = 0; j < pos + d_conv; j++, j_conv++) {
-                val += w->conv1d_weight[l].q[i * d_conv + j_conv] * s->conv_state[layer_idx + j * d_inner + i];
+                val += (float)w->conv1d_weight[l].q[i * d_conv + j_conv] * \
+                    w->conv1d_weight[l].s[(i * d_conv + j_conv) / GS] * \
+                    s->conv_state[layer_idx + j * d_inner + i];
             }
             s->conv_out[i] = val;
         }
 
         // Conv bias
         for (i = 0; i < d_inner; i++) {
-            s->conv_out[i] += w->conv1d_bias[l].q[i];
+            s->conv_out[i] += (float)w->conv1d_bias[l].q[i] * w->conv1d_bias[l].s[i / GS];
         }
 
         silu(s->conv_out, d_inner);
@@ -508,7 +522,7 @@ float* forward(Mamba* mamba, int token, int pos) {
         }
 
         quantize(&s->hq, y, d_inner);
-        matmul(s->out_proj_out, y, w->out_proj_weight + l * dim * d_inner, d_inner, dim);
+        matmul(s->out_proj_out, &s->hq, w->out_proj_weight + l, d_inner, dim);
         for (i = 0; i < dim; i++) {
             // Residual connection
             x[i] += s->out_proj_out[i];
@@ -521,7 +535,7 @@ float* forward(Mamba* mamba, int token, int pos) {
 
     // classifier into logits
     quantize(&s->xq, x, dim);
-    matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
+    matmul(s->logits, &s->xq, w->wcls, p->dim, p->vocab_size);
     return s->logits;
 }
 // ----------------------------------------------------------------------------
@@ -931,7 +945,7 @@ long time_in_ms() {
 // generation loop
 
 void generate(Mamba* mamba, Tokenizer* tokenizer, Sampler* sampler, char* prompt, int steps) {
-    char* empty_prompt = "";
+    char* empty_prompt = "<|assistant|>";
     if (prompt == NULL) {
         prompt = empty_prompt;
     }
@@ -971,9 +985,11 @@ void generate(Mamba* mamba, Tokenizer* tokenizer, Sampler* sampler, char* prompt
         }
 
         // print the token as string, decode it with the Tokenizer object
-        char* piece = decode(tokenizer, token, next);
-        safe_printf(piece);  // same as printf("%s", piece), but skips "unsafe" bytes
-        fflush(stdout);
+        if (pos > num_prompt_tokens) {
+            char* piece = decode(tokenizer, token, next);
+            safe_printf(piece);  // same as printf("%s", piece), but skips "unsafe" bytes
+            fflush(stdout);
+        }
         token = next;
 
         // init the timer here because the first iteration can be slower

@@ -828,7 +828,7 @@ long time_in_ms() {
 // generation loop
 
 void generate(Mamba* mamba, Tokenizer* tokenizer, Sampler* sampler, char* prompt, int steps) {
-    char* empty_prompt = "";
+    char* empty_prompt = "<|assistant|>";
     if (prompt == NULL) {
         prompt = empty_prompt;
     }
