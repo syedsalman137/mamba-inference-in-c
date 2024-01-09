@@ -867,10 +867,12 @@ void generate(Mamba* mamba, Tokenizer* tokenizer, Sampler* sampler, char* prompt
             break;
         }
 
-        // print the token as string, decode it with the Tokenizer object
-        char* piece = decode(tokenizer, token, next);
-        safe_printf(piece);  // same as printf("%s", piece), but skips "unsafe" bytes
-        fflush(stdout);
+        if (pos > num_prompt_tokens) {
+            // print the token as string, decode it with the Tokenizer object
+            char* piece = decode(tokenizer, token, next);
+            safe_printf(piece);  // same as printf("%s", piece), but skips "unsafe" bytes
+            fflush(stdout);
+        }
         token = next;
 
         // init the timer here because the first iteration can be slower

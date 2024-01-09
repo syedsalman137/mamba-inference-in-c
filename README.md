@@ -43,7 +43,21 @@ and for chatting, use:
 OMP_NUM_THREADS=2 ./run "path/to/model" -m chat
 ```
 
-## Models
+## Quantized models
+
+You can download chat-finetuned quantized version of model using:
+
+```
+wget https://huggingface.co/SalmanHabeeb/quantized-mambas-c-format/resolve/main/mamba-2.8b-64g-zephyr.bin
+```
+
+To run quantized models, run any make command and:
+
+```
+OMP_NUM_THREADS=2 ./runq "path/to/model"
+```
+
+## Export
 
 Also, models can be exported to required bin format by running
 
