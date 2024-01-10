@@ -312,31 +312,33 @@ void ssm(float* y, unsigned long long l, RunState* s, Config* p, MambaWeights* w
     softplus(s->delta, d_inner);
 
     // selective scan here
-    int i;
-#pragma omp parallel for private(i)
-    for (i = 0; i < d_inner; i++) {
+    int i1;
+#pragma omp parallel for private(i1)
+    for (i1 = 0; i1 < d_inner; i1++) {
         for (int j = 0; j < d_state; j++) {
-            s->deltaA[i * d_state + j] = expf(s->delta[i] * A[i * d_state + j]);
+            s->deltaA[i1 * d_state + j] = expf(s->delta[i1] * A[i1 * d_state + j]);
         }
     }
 
-#pragma omp parallel for private(i)
-    for (i = 0; i < d_inner; i++) {
+    int i2;
+#pragma omp parallel for private(i2)
+    for (int i2 = 0; i2 < d_inner; i2++) {
         for (int j = 0; j < d_state; j++) {
-            s->deltaB_u[i * d_state + j] = s->delta[i] * B[j] * s->conv_out[i];
+            s->deltaB_u[i2 * d_state + j] = s->delta[i2] * B[j] * s->conv_out[i2];
         }
     }
 
-#pragma omp parallel for private(i)
-    for (i = 0; i < d_inner; i++) {
+    int i3;
+#pragma omp parallel for private(i3)
+    for (i3 = 0; i3 < d_inner; i3++) {
         for (int j = 0; j < d_state; j++) {
 
-            s->x_ssm[l * d_inner * d_state + i * d_state + j] *= s->deltaA[i * d_state + j];
-            s->x_ssm[l * d_inner * d_state + i * d_state + j] += s->deltaB_u[i * d_state + j];
+            s->x_ssm[l * d_inner * d_state + i3 * d_state + j] *= s->deltaA[i3 * d_state + j];
+            s->x_ssm[l * d_inner * d_state + i3 * d_state + j] += s->deltaB_u[i3 * d_state + j];
 
-            y[i] += s->x_ssm[l * d_inner * d_state + i * d_state + j] * C[j];
+            y[i3] += s->x_ssm[l * d_inner * d_state + i3 * d_state + j] * C[j];
         }
-        y[i] += s->conv_out[i] * D[i];
+        y[i3] += s->conv_out[i3] * D[i3];
     }
 }
 
@@ -373,22 +375,29 @@ float* forward(Mamba* mamba, int token, int pos) {
         // conv state is a array storing d_inner x (max_seq_len + d_conv - 1) in a column major order
         // (for each layer)
         unsigned long long pos_idx = l * (max_seq_len + d_conv - 1) * d_inner + (pos + d_conv - 1) * d_inner;
-        for (int i = 0; i < d_inner; i++) {
-            s->conv_state[pos_idx + i] = s->in_proj_out[i];
-        }
+
+        //SMART WAY
+        memcpy(s->conv_state + pos_idx, s->in_proj_out, d_inner * sizeof(*s->in_proj_out));
+
+        // DUMB WAY of doing the previous memcpy
+        // for (int i = 0; i < d_inner; i++) {
+        //     s->conv_state[pos_idx + i] = s->in_proj_out[i];
+        // }
 
         // Convolve
         unsigned long long layer_idx = l * (max_seq_len + d_conv - 1) * d_inner;
-        int i;
-        for (i = 0; i < d_inner; i++) {
+        int i1;
+#pragma omp parallel for private(i1)
+        for (i1 = 0; i1 < d_inner; i1++) {
             float val = 0.0f;
             for (int j = pos, j_conv = 0; j < pos + d_conv; j++, j_conv++) {
-                val += w->conv1d_weight[l * d_inner * d_conv + i * d_conv + j_conv] * s->conv_state[layer_idx + j * d_inner + i];
+                val += w->conv1d_weight[l * d_inner * d_conv + i1 * d_conv + j_conv] * s->conv_state[layer_idx + j * d_inner + i1];
             }
-            s->conv_out[i] = val;
+            s->conv_out[i1] = val;
         }
 
         // Conv bias
+        int i;
         for (i = 0; i < d_inner; i++) {
             s->conv_out[i] += w->conv1d_bias[l * d_inner + i];
         }

@@ -2,7 +2,7 @@
 
 This repo runs Mamba models in C. We use tokenizer of Zephyr family of models, available on Huggingface.
 
-Runs about 20-25% slower 😔 than llama2.c when comparing mamba-130m vs llama-110m.
+Now runs at about the same speed as llama2.c when comparing mamba-130m vs llama-110m.
 
 ## Build and Run
 
