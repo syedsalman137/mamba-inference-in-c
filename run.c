@@ -387,7 +387,7 @@ float* forward(Mamba* mamba, int token, int pos) {
         // Convolve
         unsigned long long layer_idx = l * (max_seq_len + d_conv - 1) * d_inner;
         int i1;
-#pragma omp parallel for private(i1)
+        // #pragma omp parallel for private(i1)
         for (i1 = 0; i1 < d_inner; i1++) {
             float val = 0.0f;
             for (int j = pos, j_conv = 0; j < pos + d_conv; j++, j_conv++) {

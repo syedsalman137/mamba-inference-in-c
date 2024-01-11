@@ -499,18 +499,20 @@ float* forward(Mamba* mamba, int token, int pos) {
 
         // Convolve
         unsigned long long layer_idx = l * (max_seq_len + d_conv - 1) * d_inner;
-        int i;
-        for (i = 0; i < d_inner; i++) {
+        int i1;
+        // #pragma omp parallel for private(i1)
+        for (i1 = 0; i1 < d_inner; i1++) {
             float val = 0.0f;
             for (int j = pos, j_conv = 0; j < pos + d_conv; j++, j_conv++) {
-                val += (float)w->conv1d_weight[l].q[i * d_conv + j_conv] * \
-                    w->conv1d_weight[l].s[(i * d_conv + j_conv) / GS] * \
-                    s->conv_state[layer_idx + j * d_inner + i];
+                val += (float)w->conv1d_weight[l].q[i1 * d_conv + j_conv] * \
+                    w->conv1d_weight[l].s[(i1 * d_conv + j_conv) / GS] * \
+                    s->conv_state[layer_idx + j * d_inner + i1];
             }
-            s->conv_out[i] = val;
+            s->conv_out[i1] = val;
         }
 
         // Conv bias
+        int  i;
         for (i = 0; i < d_inner; i++) {
             s->conv_out[i] += (float)w->conv1d_bias[l].q[i] * w->conv1d_bias[l].s[i / GS];
         }
