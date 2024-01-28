@@ -52,7 +52,7 @@ typedef struct {
     float* xb2;  // an additional buffer just for convenience (d_inner,)
     float* in_proj_out;
     float* out_proj_out;
-    float* conv_out;
+    float* y;
     float* logits;  // output logits
     // kv cache
     float* conv_state;
@@ -85,7 +85,7 @@ void malloc_run_state(RunState* s, Config* p) {
     // s->value_cache = calloc(p->n_layers * p->seq_len * kv_dim, sizeof(float));
     s->in_proj_out = calloc(d_inner * 2, sizeof(float));
     s->conv_state = calloc(p->n_layers * (p->max_seq_len + p->d_conv - 1) * d_inner, sizeof(float));
-    s->conv_out = calloc(d_inner, sizeof(float));
+    s->y = calloc(d_inner, sizeof(float));
     s->x_ssm = calloc(p->n_layers * d_inner * p->d_state, sizeof(float));
     s->out_proj_out = calloc(p->dim, sizeof(float));
     s->logits = calloc(p->vocab_size, sizeof(float));
@@ -95,7 +95,7 @@ void malloc_run_state(RunState* s, Config* p) {
     s->deltaA = calloc(d_inner * p->d_state, sizeof(float));
     s->deltaB_u = calloc(d_inner * p->d_state, sizeof(float));
     // ensure all mallocs went fine
-    if (!s->x || !s->xb || !s->xb2 || !s->in_proj_out || !s->conv_state || !s->conv_out || !s->x_ssm || !s->out_proj_out || !s->logits) {
+    if (!s->x || !s->xb || !s->xb2 || !s->in_proj_out || !s->conv_state || !s->y || !s->x_ssm || !s->out_proj_out || !s->logits) {
         fprintf(stderr, "malloc failed!\n");
         exit(EXIT_FAILURE);
     }
@@ -107,7 +107,7 @@ void free_run_state(RunState* s) {
     free(s->xb2);
     free(s->in_proj_out);
     free(s->conv_state);
-    free(s->conv_out);
+    free(s->y);
     free(s->x_ssm);
     free(s->out_proj_out);
     free(s->logits);
@@ -286,7 +286,7 @@ void softplus(float* x, int d) {
     }
 }
 
-void ssm(float* y, unsigned long long l, RunState* s, Config* p, MambaWeights* w) {
+void ssm(unsigned long long l, RunState* s, Config* p, MambaWeights* w, int pos) {
     int dim = p->dim;
     int d_state = p->d_state;
     int d_conv = p->d_conv;
@@ -294,11 +294,11 @@ void ssm(float* y, unsigned long long l, RunState* s, Config* p, MambaWeights* w
     int d_inner = p->dim * p->expand;
     int dt_rank = p->dt_rank;
     int max_seq_len = p->max_seq_len;
-
-    // negexp(s->A, w->A_log + l * d_inner * d_state, d_inner * d_state);
+    if (pos == 0)
+        negexp(s->A + l * d_inner * d_state, w->A_log + l * d_inner * d_state, d_inner * d_state);
     float* A = s->A + l * d_inner * d_state;
 
-    matmul(s->x_proj_out, s->conv_out, w->x_proj_weight + l * (dt_rank + 2 * d_state) * d_inner, d_inner, dt_rank + 2 * d_state);
+    matmul(s->x_proj_out, s->y, w->x_proj_weight + l * (dt_rank + 2 * d_state) * d_inner, d_inner, dt_rank + 2 * d_state);
     float* B = s->x_proj_out + dt_rank;
     float* C = B + d_state;
 
@@ -324,21 +324,21 @@ void ssm(float* y, unsigned long long l, RunState* s, Config* p, MambaWeights* w
 #pragma omp parallel for private(i2)
     for (int i2 = 0; i2 < d_inner; i2++) {
         for (int j = 0; j < d_state; j++) {
-            s->deltaB_u[i2 * d_state + j] = s->delta[i2] * B[j] * s->conv_out[i2];
+            s->deltaB_u[i2 * d_state + j] = s->delta[i2] * B[j] * s->y[i2];
         }
     }
 
     int i3;
 #pragma omp parallel for private(i3)
     for (i3 = 0; i3 < d_inner; i3++) {
+        s->y[i3] *= D[i3];
         for (int j = 0; j < d_state; j++) {
 
             s->x_ssm[l * d_inner * d_state + i3 * d_state + j] *= s->deltaA[i3 * d_state + j];
             s->x_ssm[l * d_inner * d_state + i3 * d_state + j] += s->deltaB_u[i3 * d_state + j];
 
-            y[i3] += s->x_ssm[l * d_inner * d_state + i3 * d_state + j] * C[j];
+            s->y[i3] += s->x_ssm[l * d_inner * d_state + i3 * d_state + j] * C[j];
         }
-        y[i3] += s->conv_out[i3] * D[i3];
     }
 }
 
@@ -356,10 +356,10 @@ float* forward(Mamba* mamba, int token, int pos) {
     int dt_rank = p->dt_rank;
     int max_seq_len = p->max_seq_len;
 
-    if (pos == 0) {
-        // precompute A_log -> A
-        negexp(s->A, w->A_log, p->n_layers * d_inner * d_state);
-    }
+    // if (pos == 0) {
+    //     // precompute A_log -> A
+    //     negexp(s->A, w->A_log, p->n_layers * d_inner * d_state);
+    // }
 
 
     // copy the token embedding into x
@@ -372,7 +372,7 @@ float* forward(Mamba* mamba, int token, int pos) {
         float* res = s->in_proj_out + d_inner;
 
         // set the conv state
-        // conv state is a array storing d_inner x (max_seq_len + d_conv - 1) in a column major order
+        // conv state is a array storing d_inner x (max_seq_len + (left-(padding=d_conv - 1))) in a column major order
         // (for each layer)
         unsigned long long pos_idx = l * (max_seq_len + d_conv - 1) * d_inner + (pos + d_conv - 1) * d_inner;
 
@@ -387,41 +387,37 @@ float* forward(Mamba* mamba, int token, int pos) {
         // Convolve
         unsigned long long layer_idx = l * (max_seq_len + d_conv - 1) * d_inner;
         int i1;
-        // #pragma omp parallel for private(i1)
         for (i1 = 0; i1 < d_inner; i1++) {
             float val = 0.0f;
             for (int j = pos, j_conv = 0; j < pos + d_conv; j++, j_conv++) {
                 val += w->conv1d_weight[l * d_inner * d_conv + i1 * d_conv + j_conv] * s->conv_state[layer_idx + j * d_inner + i1];
             }
-            s->conv_out[i1] = val;
+            s->y[i1] = val;
         }
 
         // Conv bias
         int i;
         for (i = 0; i < d_inner; i++) {
-            s->conv_out[i] += w->conv1d_bias[l * d_inner + i];
+            s->y[i] += w->conv1d_bias[l * d_inner + i];
         }
 
-        silu(s->conv_out, d_inner);
+        silu(s->y, d_inner);
 
-        float* y = calloc(d_inner, sizeof(float));
-        ssm(y, l, s, p, w);
+        ssm(l, s, p, w, pos);
 
         // y = y * F.silu(res)
         for (i = 0; i < d_inner; i++) {
             float val = res[i];
             // silu(x)=x*σ(x), where σ(x) is the logistic sigmoid
             val *= (1.0f / (1.0f + expf(-val)));
-            y[i] *= val;
+            s->y[i] *= val;
         }
 
-        matmul(s->out_proj_out, y, w->out_proj_weight + l * dim * d_inner, d_inner, dim);
+        matmul(s->out_proj_out, s->y, w->out_proj_weight + l * dim * d_inner, d_inner, dim);
         for (i = 0; i < dim; i++) {
             // Residual connection
             x[i] += s->out_proj_out[i];
         }
-
-        free(y);
     }
     // final rms norm
     rmsnorm(x, x, w->rms_final_weight, dim);

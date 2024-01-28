@@ -71,9 +71,19 @@ Also, tokenizer can be obtained by using:
 python export_tokenizer.py path/to/save/tokenizer --tokenizer "huggingface-tokenizer"
 ```
 
+## Performance
+
+![Time taken by each function for a token](https://github.com/SalmanHabeeb/raw/main/assets/time-spent.png)
+
+The above chart details the time consumed per token by each function. Most of the time is spent in matmul in_proj, since that is the largest matrix multiplication, other than final matmul (to produce logits). I still don't understand why there are so many peaks and valleys, but it may have something to do with cache.
+
 ## Attribution
 
 - [karpathy/llama2.c](https://github.com/karpathy/llama2.c) -- Basically this repository is unofficial fork of karpathy/llama2.c
 - [johnma2006/mamba-minimal](https://github.com/johnma2006/mamba-minimal) -- Inspired mamba implementation
 - [havenhq/mamba-chat](https://github.com/havenhq/mamba-chat) -- For chat-finetuning of models
 - [state-spaces/mamba](https://github.com/state-spaces/mamba)
+
+## License
+
+[MIT License](https://github.com/SalmanHabeeb/mamba-inference-in-c/blob/main/LICENSE)

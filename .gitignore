@@ -6,6 +6,10 @@
 *.exe
 *.out
 run
+runq
+
+# Assembly files
+*.s
 
 # VS Code files
 /.vscode
@@ -13,3 +17,9 @@ run
 
 # File copies
 *.copy
+
+# Environment files
+/env
+
+# Other files
+*.csv
