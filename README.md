@@ -73,10 +73,20 @@ python export_tokenizer.py path/to/save/tokenizer --tokenizer "huggingface-token
 
 ## Performance
 
-![Time taken by each function for a token](https://github.com/SalmanHabeeb/raw/main/assets/time-spent.png)
+<p align="center">
+  <img src="assets/time-spent.png" alt="Cute Llama">
+</p>
 
 The above chart details the time consumed per token by each function. Most of the time is spent in matmul in_proj, since that is the largest matrix multiplication, other than final matmul (to produce logits). I still don't understand why there are so many peaks and valleys, but it may have something to do with cache.
 
+The chart can be generated using this code:
+
+```
+# CC={gcc, clang}
+$(CC) -Ofast -fopenmp -march=native run-timeit.c  -lm  -o run-timeit
+./run-timeit
+python plot.py
+```
 ## Attribution
 
 - [karpathy/llama2.c](https://github.com/karpathy/llama2.c) -- Basically this repository is unofficial fork of karpathy/llama2.c
